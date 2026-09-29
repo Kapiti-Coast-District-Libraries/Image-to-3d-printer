@@ -1,0 +1,6 @@
+{
+  "name": "PolyTrace 3MF",
+  "description": "Inkscape-style 4-colour vector image tracer and 3D extrusion studio for Bambu Lab multi-colour .3mf printing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
