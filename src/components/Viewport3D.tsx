@@ -259,9 +259,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           ? explodeAmount * (10 + idx * 3.5)
           : explodeAmount * idx * 4.5;
 
-      const shouldFlipPart =
+      // In the 3D preview stage, plaque sign parts ALWAYS stay facing UP so the user
+      // can inspect their artwork, colours, and text right side up on the plate.
+      // (On export, parts are automatically flipped face-down onto the PEI bed when flipFaceDown is active).
+      const shouldFlipPartInPreview =
         flipFaceDown &&
-        part.partGroup !== 'box' &&
+        part.partGroup === 'lid' &&
         !part.isPreFlippedFaceDown;
       const pivotX = part.offsetX || 0;
       const zSum =
@@ -271,14 +274,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
       mesh.position.set(0, 0, zExplodeOffset);
 
-      if (shouldFlipPart) {
+      if (shouldFlipPartInPreview) {
         mesh.scale.set(-1, 1, -1);
         mesh.position.set(2 * pivotX, 0, zSum + zExplodeOffset);
       }
 
       mesh.userData = {
         offsetX: pivotX,
-        isFlippedFaceDown: Boolean(shouldFlipPart || part.isPreFlippedFaceDown),
+        isFlippedFaceDown: Boolean(shouldFlipPartInPreview || part.isPreFlippedFaceDown),
         partGroup: part.partGroup,
       };
 

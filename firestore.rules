@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: printSubmissions
+    // Document ID: auto-generated
+    // Required Fields:
+    //   - refId: string (1..40 chars)
+    //   - createdAt: number (> 0)
+    //   - status: string in ['queued', 'in_slicer', 'printing', 'ready', 'completed', 'cancelled']
+    //   - fullName: string (1..120 chars)
+    //   - email: string (1..160 chars)
+    //   - pickupLocation: string (1..120 chars)
+    //   - config: map
+    //   - signDescription: string (1..300 chars)
+    //   - approxTotalGrams: number (>= 0)
+    //   - approxMinutes: number (>= 0)
+    //   - costNzd: number (>= 0)
+    // Optional Fields:
+    //   - updatedAt: number
+    //   - phoneOrCard: string (0..80 chars)
+    //   - notes: string (0..1000 chars)
+    //   - staffNotes: string (0..2000 chars)
+    //   - printedBy: string (0..120 chars)
+    // ===============================================================
+
+    function isValidStatus(status) {
+      return status in ['queued', 'in_slicer', 'printing', 'ready', 'completed', 'cancelled'];
+    }
+
+    function isValidPrintSubmission(data) {
+      return data.refId is string && data.refId.size() >= 1 && data.refId.size() <= 40 &&
+             data.createdAt is number && data.createdAt > 0 &&
+             isValidStatus(data.status) &&
+             data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+             data.email is string && data.email.size() >= 1 && data.email.size() <= 160 &&
+             data.pickupLocation is string && data.pickupLocation.size() >= 1 && data.pickupLocation.size() <= 120 &&
+             data.config is map &&
+             data.signDescription is string && data.signDescription.size() >= 1 && data.signDescription.size() <= 300 &&
+             data.approxTotalGrams is number && data.approxTotalGrams >= 0 &&
+             data.approxMinutes is number && data.approxMinutes >= 0 &&
+             data.costNzd is number && data.costNzd >= 0 &&
+             (!('phoneOrCard' in data) || data.phoneOrCard == null || (data.phoneOrCard is string && data.phoneOrCard.size() <= 80)) &&
+             (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 1000)) &&
+             (!('staffNotes' in data) || data.staffNotes == null || (data.staffNotes is string && data.staffNotes.size() <= 2000)) &&
+             (!('printedBy' in data) || data.printedBy == null || (data.printedBy is string && data.printedBy.size() <= 120));
+    }
+
+    match /printSubmissions/{submissionId} {
+      allow get, list: if true;
+      allow create: if isValidPrintSubmission(request.resource.data);
+      allow update: if isValidPrintSubmission(request.resource.data) &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       request.resource.data.refId == resource.data.refId;
+      allow delete: if true;
+    }
+  }
+}

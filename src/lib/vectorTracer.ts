@@ -791,6 +791,110 @@ export function tracePlanarColorPartition(
 }
 
 /**
+ * Generates an exact CAD-smooth closed polygon ring for a Square, Rounded Square,
+ * Rectangle, Rounded Rectangle, or Circle (when cornerR >= halfW === halfH).
+ * Screen coordinate convention: signedArea > 0 for outer rings, signedArea < 0 for holes.
+ */
+export function buildAnalyticRoundedBoxRing(
+  cx: number,
+  cy: number,
+  halfW: number,
+  halfH: number,
+  cornerR: number,
+  isHole: boolean = false,
+  segmentsPerCorner: number = 24
+): Point[] {
+  const hw = Math.max(1, halfW);
+  const hh = Math.max(1, halfH);
+  const r = Math.max(0, Math.min(cornerR, hw, hh));
+  const pts: Point[] = [];
+
+  if (r <= 0.15) {
+    pts.push(
+      { x: cx - hw, y: cy - hh },
+      { x: cx + hw, y: cy - hh },
+      { x: cx + hw, y: cy + hh },
+      { x: cx - hw, y: cy + hh }
+    );
+  } else {
+    const corners = [
+      { ox: cx + hw - r, oy: cy + hh - r, startAngle: 0 },
+      { ox: cx - hw + r, oy: cy + hh - r, startAngle: Math.PI * 0.5 },
+      { ox: cx - hw + r, oy: cy - hh + r, startAngle: Math.PI },
+      { ox: cx + hw - r, oy: cy - hh + r, startAngle: Math.PI * 1.5 },
+    ];
+    const isFullCircle = Math.abs(hw - r) < 0.05 && Math.abs(hh - r) < 0.05;
+    for (let q = 0; q < 4; q++) {
+      const { ox, oy, startAngle } = corners[q];
+      const count = isFullCircle ? segmentsPerCorner : segmentsPerCorner + 1;
+      for (let i = 0; i < count; i++) {
+        if (isFullCircle && i === segmentsPerCorner) continue;
+        const t = i / segmentsPerCorner;
+        const ang = startAngle + t * (Math.PI * 0.5);
+        const px = ox + Math.cos(ang) * r;
+        const py = oy + Math.sin(ang) * r;
+        if (pts.length > 0) {
+          const prev = pts[pts.length - 1];
+          if (Math.hypot(px - prev.x, py - prev.y) < 0.05) continue;
+        }
+        pts.push({ x: px, y: py });
+      }
+    }
+  }
+
+  const area = computeSignedArea(pts);
+  if ((!isHole && area < 0) || (isHole && area > 0)) {
+    pts.reverse();
+  }
+  if (pts.length > 0) {
+    pts.push({ ...pts[0] });
+  }
+  return pts;
+}
+
+/**
+ * Computes the exact Boolean subtraction (enclosingOuterRing \ artworkPolys).
+ * If `fillArtworkInteriorHoles` is true, enclosed holes inside the artwork become solid islands
+ * of the lid/badge fill; if false, only the outer boundaries of artworkPolys are subtracted.
+ */
+export function buildEnclosingFillMinusArtwork(
+  enclosingOuterRing: Point[],
+  artworkPolys: TracedPolygon[],
+  fillArtworkInteriorHoles: boolean = true
+): TracedPolygon[] {
+  const outerCopy = enclosingOuterRing.map((p) => ({ ...p }));
+  if (computeSignedArea(outerCopy) < 0) {
+    outerCopy.reverse();
+  }
+  if (
+    outerCopy.length > 0 &&
+    Math.hypot(
+      outerCopy[0].x - outerCopy[outerCopy.length - 1].x,
+      outerCopy[0].y - outerCopy[outerCopy.length - 1].y
+    ) > 1e-3
+  ) {
+    outerCopy.push({ ...outerCopy[0] });
+  }
+
+  const loops: Point[][] = [outerCopy];
+  for (const poly of artworkPolys) {
+    const invOuter = [...poly.outer].reverse();
+    if (computeSignedArea(invOuter) > 0) invOuter.reverse();
+    loops.push(invOuter);
+
+    if (fillArtworkInteriorHoles) {
+      for (const h of poly.holes) {
+        const invHole = [...h].reverse();
+        if (computeSignedArea(invHole) < 0) invHole.reverse();
+        loops.push(invHole);
+      }
+    }
+  }
+
+  return buildPolygonHierarchy(loops, 1.0);
+}
+
+/**
  * Legacy single-mask Marching Squares tracer kept for standalone binary masks.
  */
 export function traceBinaryMaskToPolygons(

@@ -1,33 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Overpass:wght@700;800;900&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-display: 'Syne', sans-serif;
-  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sign: "Overpass", "Inter", ui-sans-serif, sans-serif;
 }
 
 @layer base {
   body {
     font-family: var(--font-sans);
-    background-color: #0B0F17;
-    color: #F1F5F9;
+    background-color: #f8fafc;
+    color: #0f172a;
     overflow-x: hidden;
   }
 }
 
-/* Custom subtle scrollbars for inspector panels */
+/* Custom subtle scrollbars for inspector panels & tables */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.4);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.25);
+  background: rgba(148, 163, 184, 0.38);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
+  background: rgba(100, 116, 139, 0.55);
 }
-

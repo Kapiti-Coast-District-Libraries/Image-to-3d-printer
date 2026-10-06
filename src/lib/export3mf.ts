@@ -26,18 +26,8 @@ interface ExportFilamentSlot {
   settingsId: string;
 }
 
-/**
- * Encodes a 1-based extruder number into Bambu Studio / PrusaSlicer triangle paint_color hex string.
- * Extruder 1 -> "4", Extruder 2 -> "8", Extruder 3 -> "0C", Extruder 4 -> "1C", Extruder 5 -> "2C"
- */
-function getBambuPaintColorCode(extruderNum: number): string {
-  if (extruderNum === 1) return '4';
-  if (extruderNum === 2) return '8';
-  if (extruderNum === 3) return '0C';
-  if (extruderNum === 4) return '1C';
-  if (extruderNum === 5) return '2C';
-  return '4';
-}
+// Function removed: Bambu Studio slicer uses part-level extruder metadata instead of paint_color
+// which previously caused colors to scramble or slice with default filament.
 
 /**
  * Generates a Bambu Studio / OrcaSlicer / PrusaSlicer compatible multi-colour .3mf archive
@@ -99,6 +89,14 @@ export async function generateBambu3mfBlob(
     });
     return colorIndex;
   };
+
+  // If slotConfigs is provided, register active slots in exact slot order (AMS Slots 1..4)
+  if (options.slotConfigs && options.slotConfigs.length > 0) {
+    for (const slot of options.slotConfigs) {
+      if (slot.mergedIntoSlot != null) continue;
+      registerColorAsFilament(slot.printHex);
+    }
+  }
 
   // Register parts in slot order (0..3+) using each part's authoritative colorHex
   const sortedPartsWithOriginalIndex = model.parts
@@ -167,7 +165,6 @@ export async function generateBambu3mfBlob(
     const filIdx = partToFilamentIdx[i];
     const fil = filamentSlots[filIdx];
     const extruderNum = fil.extruderIndex;
-    const paintCode = getBambuPaintColorCode(extruderNum);
     const partDisplayName =
       part.partGroup === 'box'
         ? `Hollow_Box_${fil.bambuName.replace(/\s+/g, '_')}_${fil.hex.replace('#', '')}`
@@ -203,13 +200,8 @@ export async function generateBambu3mfBlob(
     const triangleLines: string[] = new Array(part.triangles.length);
     for (let tIdx = 0; tIdx < part.triangles.length; tIdx++) {
       const [v1, v2, v3] = part.triangles[tIdx];
-      if (colorFormat === 'bambu_project') {
-        triangleLines[tIdx] =
-          `          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="1" p1="${filIdx}" p2="${filIdx}" p3="${filIdx}" paint_color="${paintCode}" />`;
-      } else {
-        triangleLines[tIdx] =
-          `          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="1" p1="${filIdx}" p2="${filIdx}" p3="${filIdx}" />`;
-      }
+      triangleLines[tIdx] =
+        `          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="1" p1="${filIdx}" p2="${filIdx}" p3="${filIdx}" />`;
     }
 
     objectXmlBlocks.push(`    <object id="${objectId}" name="${partDisplayName}" type="model" pid="1" pindex="${filIdx}">

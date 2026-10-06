@@ -1,5 +1,8 @@
 import {
   TracedPolygon,
+  buildAnalyticRoundedBoxRing,
+  buildEnclosingFillMinusArtwork,
+  computeSignedArea,
   traceBinaryMaskToPolygons,
   tracePlanarColorPartition,
 } from './vectorTracer';
@@ -72,6 +75,8 @@ export type BoxPlateLayout = 'assembled' | 'side_by_side';
 
 export type BoxExportParts = 'both' | 'box_only' | 'lid_only';
 
+export type BoxOutlineShape = 'contour' | 'square' | 'circle' | 'rectangle';
+
 export interface TraceParameters {
   numColors: 2 | 3 | 4;
   bgRemovalMode: BgRemovalMode;
@@ -87,6 +92,9 @@ export interface TraceParameters {
   closeColorGaps: boolean; // Ensures 100% shared-edge planar lock & heals interior micro-cracks
   seamOverlapMm: number; // Optional outward kerf overlap (0.00 - 0.15 mm) for face-down slicer fusion
   strokeEnabled: boolean; // Adds a smooth offset stroke outline around the logo that also forms the 3D base
+  strokeShape?: BoxOutlineShape; // 'contour' (follows logo), 'square' (1:1 box), 'circle' (round box), 'rectangle' (fitted rect)
+  shapePaddingMm?: number; // Margin around the traced logo inside the square/circle/rect cavity in mm (e.g. 3.5mm)
+  shapeCornerRadiusMm?: number; // Corner fillet radius for 'square' and 'rectangle' in mm (e.g. 4.0mm)
   strokeWidthMm: number; // Physical stroke outline width in millimeters (e.g. 2.5mm)
   strokeColorHex: string; // Chosen colour for the stroke outline and base
   strokeFillInnerGaps: boolean; // Fills enclosed interior holes inside the stroke silhouette for a solid badge base
@@ -104,6 +112,7 @@ export interface TraceParameters {
   baseThicknessMm: number; // e.g. 2.0mm
   inlayThicknessMm: number; // e.g. 0.8mm
   baseSlotIndex: number; // Which of the 4 colours acts as the full silhouette backing in 'backed_inlay'
+  flipFaceDown?: boolean; // Face-down PEI bed orientation (non-base inlays at exactly Z = 0..inlayThicknessMm)
 }
 
 export interface TracedColorLayer {
@@ -1449,87 +1458,13 @@ export function runMultiColorTracePipeline(
     }
   }
 
-  // 4B. If Outer Stroke & Base (or Box Mode) is enabled, expand a smooth round-join offset collar around activeFgMask
-  let computedStrokeRadiusPx = 0;
-  let computedPxPerMm = 1;
+  // 4B & 4C & 4D: Apply manual click-to-merge region overrides and build either:
+  // - Organic Contour Stroke/Box ('contour'), or
+  // - Geometric Square, Circle, or Rectangle Box/Badge ('square' | 'circle' | 'rectangle') for odd-shaped logos
+  const strokeShape: BoxOutlineShape = params.strokeShape || 'contour';
+  const isGeometricShape =
+    useDedicatedStrokeSlot && strokeSlotIdx >= 0 && strokeShape !== 'contour';
 
-  if (useDedicatedStrokeSlot && strokeSlotIdx >= 0) {
-    // Measure current foreground pixel width so strokeWidthMm maps accurately to pixels
-    let minX = width,
-      maxX = 0;
-    let hasFg = false;
-    for (let y = 0; y < height; y++) {
-      const row = y * width;
-      for (let x = 0; x < width; x++) {
-        if (activeFgMask[row + x]) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          hasFg = true;
-        }
-      }
-    }
-
-    if (hasFg) {
-      const fgPxWidth = Math.max(16, maxX - minX);
-      const approxTotalMm = Math.max(15, params.targetWidthMm);
-      computedPxPerMm =
-        fgPxWidth / Math.max(10, approxTotalMm - 2 * effectiveStrokeWidthMm);
-      computedStrokeRadiusPx = Math.max(
-        1.8,
-        Math.min(48, effectiveStrokeWidthMm * computedPxPerMm)
-      );
-      const maxDistSq = computedStrokeRadiusPx * computedStrokeRadiusPx;
-
-      const distSq = computeEuclideanDistanceSq(activeFgMask, width, height);
-
-      for (let i = 0; i < total; i++) {
-        if (!activeFgMask[i] && distSq[i] <= maxDistSq) {
-          activeFgMask[i] = 1;
-          activeLabels[i] = strokeSlotIdx;
-        }
-      }
-
-      // If Solid Badge Base (Close Inner Gaps) or Box Mode is active, fill any remaining enclosed interior holes
-      // inside the stroke silhouette with the Stroke & Base colour
-      if (params.strokeFillInnerGaps || params.boxMode) {
-        const exteriorVisited = new Uint8Array(total);
-        const queue = new Int32Array(total);
-        let head = 0,
-          tail = 0;
-        const pushExt = (idx: number) => {
-          if (!activeFgMask[idx] && !exteriorVisited[idx]) {
-            exteriorVisited[idx] = 1;
-            queue[tail++] = idx;
-          }
-        };
-        for (let x = 0; x < width; x++) {
-          pushExt(x);
-          pushExt((height - 1) * width + x);
-        }
-        for (let y = 0; y < height; y++) {
-          pushExt(y * width);
-          pushExt(y * width + (width - 1));
-        }
-        while (head < tail) {
-          const curr = queue[head++];
-          const cx = curr % width;
-          const cy = (curr - cx) / width;
-          if (cx > 0) pushExt(curr - 1);
-          if (cx < width - 1) pushExt(curr + 1);
-          if (cy > 0) pushExt(curr - width);
-          if (cy < height - 1) pushExt(curr + width);
-        }
-        for (let i = 0; i < total; i++) {
-          if (!activeFgMask[i] && !exteriorVisited[i]) {
-            activeFgMask[i] = 1;
-            activeLabels[i] = strokeSlotIdx;
-          }
-        }
-      }
-    }
-  }
-
-  // 4C. Apply manual click-to-merge region overrides (absorbs unwanted clicked details into their surrounding colour)
   const strokeRgb = hexToRgb(params.strokeColorHex || '#141821');
   const getSlotDisplayHex = (slotIdx: number): string => {
     if (useDedicatedStrokeSlot && slotIdx === strokeSlotIdx) {
@@ -1542,122 +1477,380 @@ export function runMultiColorTracePipeline(
     return rgbToHex(centroids[slotIdx] || strokeRgb);
   };
 
-  const resolvedMergedRegions = applyManualMergedRegions(
-    activeLabels,
-    activeFgMask,
-    width,
-    height,
-    useDedicatedStrokeSlot ? 5 : params.numColors,
-    params.minIslandPx,
-    params.mergedRegions,
-    resolveTargetSlot,
-    getSlotDisplayHex
-  );
-
-  // 4D. Separate Outer Stroke Box Wall (strokeSlotIdx = 4) from Interior Lid Gap-Fill (lidInnerFillIdx = 5)
-  // and compute the Inner Support Ledge / Deep Cavity mask (`innerDeepCavityMask`) for Box Mode.
+  let computedStrokeRadiusPx = 0;
+  let computedPxPerMm = 1;
   let innerDeepCavityMask: Uint8Array | undefined = undefined;
-  if (useDedicatedStrokeSlot && strokeSlotIdx >= 0 && computedStrokeRadiusPx > 0) {
-    // 1. Identify exterior outside the full silhouette
-    const exteriorVisited = new Uint8Array(total);
-    const queue = new Int32Array(total);
-    let head = 0,
-      tail = 0;
-    const pushExt = (idx: number) => {
-      if (!activeFgMask[idx] && !exteriorVisited[idx]) {
-        exteriorVisited[idx] = 1;
-        queue[tail++] = idx;
-      }
-    };
-    for (let x = 0; x < width; x++) {
-      pushExt(x);
-      pushExt((height - 1) * width + x);
-    }
+  let resolvedMergedRegions: ResolvedMergedRegion[] = [];
+  let artworkOnlyLabels: Int8Array | null = null;
+  let geomCenter = { cx: width * 0.5, cy: height * 0.5 };
+  let geomInner = { halfW: 50, halfH: 50, cornerR: 0 };
+  let geomOuter = { halfW: 60, halfH: 60, cornerR: 0 };
+  let geomDeep = { halfW: 42, halfH: 42, cornerR: 0 };
+
+  const sdRoundedBox2D = (
+    dx: number,
+    dy: number,
+    halfW: number,
+    halfH: number,
+    r: number
+  ): number => {
+    const cr = Math.max(0, Math.min(r, halfW, halfH));
+    const qx = Math.abs(dx) - (halfW - cr);
+    const qy = Math.abs(dy) - (halfH - cr);
+    return (
+      Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) +
+      Math.min(Math.max(qx, qy), 0) -
+      cr
+    );
+  };
+
+  if (isGeometricShape) {
+    // 1. Apply manual click-to-merge rules to the artwork pixels first
+    resolvedMergedRegions = applyManualMergedRegions(
+      activeLabels,
+      activeFgMask,
+      width,
+      height,
+      params.numColors,
+      params.minIslandPx,
+      params.mergedRegions,
+      resolveTargetSlot,
+      getSlotDisplayHex
+    );
+
+    artworkOnlyLabels = new Int8Array(activeLabels);
+
+    // 2. Measure artwork bounding box and center
+    let minX = width,
+      maxX = 0,
+      minY = height,
+      maxY = 0;
+    let hasFg = false;
     for (let y = 0; y < height; y++) {
-      pushExt(y * width);
-      pushExt(y * width + (width - 1));
-    }
-    while (head < tail) {
-      const curr = queue[head++];
-      const cx = curr % width;
-      const cy = (curr - cx) / width;
-      if (cx > 0) pushExt(curr - 1);
-      if (cx < width - 1) pushExt(curr + 1);
-      if (cy > 0) pushExt(curr - width);
-      if (cy < height - 1) pushExt(curr + width);
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        if (activeFgMask[row + x]) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          hasFg = true;
+        }
+      }
     }
 
-    if (params.boxMode || params.strokeFillInnerGaps) {
+    if (hasFg) {
+      const cx = (minX + maxX) * 0.5;
+      const cy = (minY + maxY) * 0.5;
+      geomCenter = { cx, cy };
+
+      const wallMm = Math.max(0.8, effectiveStrokeWidthMm);
+      const padMm = Math.max(0.5, params.shapePaddingMm ?? 3.5);
+      const ledgeMm = Math.max(0.6, params.boxLedgeWidthMm ?? 1.4);
+      const outerHalfWidthMm = Math.max(12, params.targetWidthMm * 0.5);
+      const logoHalfWidthMm = Math.max(4.0, outerHalfWidthMm - wallMm - padMm);
+
+      const logoHalfW = Math.max(8, (maxX - minX) * 0.5);
+      const logoHalfH = Math.max(8, (maxY - minY) * 0.5);
+
+      let innerHalfW = logoHalfW;
+      let innerHalfH = logoHalfH;
+      let innerCornerR = 0;
+      let wallPx = 4;
+      let ledgePx = 3;
+
+      if (strokeShape === 'circle') {
+        let maxLogoRadPx = 8;
+        for (let y = minY; y <= maxY; y++) {
+          const row = y * width;
+          for (let x = minX; x <= maxX; x++) {
+            if (activeFgMask[row + x]) {
+              const d = Math.hypot(x - cx, y - cy);
+              if (d > maxLogoRadPx) maxLogoRadPx = d;
+            }
+          }
+        }
+        computedPxPerMm = maxLogoRadPx / logoHalfWidthMm;
+        const padPx = Math.max(2.5, padMm * computedPxPerMm);
+        wallPx = Math.max(2.0, wallMm * computedPxPerMm);
+        ledgePx = Math.max(1.6, ledgeMm * computedPxPerMm);
+        innerHalfW = maxLogoRadPx + padPx;
+        innerHalfH = innerHalfW;
+        innerCornerR = innerHalfW;
+      } else {
+        const baseHalfX =
+          strokeShape === 'square' ? Math.max(logoHalfW, logoHalfH) : logoHalfW;
+        const baseHalfY =
+          strokeShape === 'square' ? Math.max(logoHalfW, logoHalfH) : logoHalfH;
+        computedPxPerMm = baseHalfX / logoHalfWidthMm;
+        const padPx = Math.max(2.5, padMm * computedPxPerMm);
+        wallPx = Math.max(2.0, wallMm * computedPxPerMm);
+        ledgePx = Math.max(1.6, ledgeMm * computedPxPerMm);
+        innerHalfW = baseHalfX + padPx;
+        innerHalfH = baseHalfY + padPx;
+
+        const cornerMm = Math.max(0, params.shapeCornerRadiusMm ?? 4.0);
+        const reqOuterCornerR = Math.min(
+          cornerMm * computedPxPerMm,
+          innerHalfW + wallPx,
+          innerHalfH + wallPx
+        );
+        innerCornerR = Math.max(
+          0,
+          Math.min(reqOuterCornerR - wallPx, innerHalfW - 0.5, innerHalfH - 0.5)
+        );
+
+        // Guarantee no corner pixel of the logo comes closer than padPx to the rounded corner wall
+        let maxSd = -Infinity;
+        for (let y = minY; y <= maxY; y++) {
+          const row = y * width;
+          for (let x = minX; x <= maxX; x++) {
+            if (activeFgMask[row + x]) {
+              const sd = sdRoundedBox2D(
+                x - cx,
+                y - cy,
+                innerHalfW,
+                innerHalfH,
+                innerCornerR
+              );
+              if (sd > maxSd) maxSd = sd;
+            }
+          }
+        }
+        if (maxSd > -padPx) {
+          const extra = maxSd + padPx;
+          innerHalfW += extra;
+          innerHalfH += extra;
+        }
+      }
+
+      computedStrokeRadiusPx = wallPx;
+      const outerHalfW = innerHalfW + wallPx;
+      const outerHalfH = innerHalfH + wallPx;
+      const outerCornerR =
+        strokeShape === 'circle'
+          ? outerHalfW
+          : Math.min(
+              outerHalfW,
+              outerHalfH,
+              innerCornerR > 0 ? innerCornerR + wallPx : 0
+            );
+      const deepHalfW = Math.max(2, innerHalfW - ledgePx);
+      const deepHalfH = Math.max(2, innerHalfH - ledgePx);
+      const deepCornerR =
+        strokeShape === 'circle'
+          ? deepHalfW
+          : Math.max(0, innerCornerR - ledgePx);
+
+      geomInner = { halfW: innerHalfW, halfH: innerHalfH, cornerR: innerCornerR };
+      geomOuter = { halfW: outerHalfW, halfH: outerHalfH, cornerR: outerCornerR };
+      geomDeep = { halfW: deepHalfW, halfH: deepHalfH, cornerR: deepCornerR };
+
+      // Populate activeFgMask and activeLabels for the 2D quantizedImageData preview
+      for (let y = 0; y < height; y++) {
+        const row = y * width;
+        const dy = y - cy;
+        for (let x = 0; x < width; x++) {
+          const idx = row + x;
+          if (artworkOnlyLabels[idx] >= 0) continue;
+          const sd = sdRoundedBox2D(x - cx, dy, innerHalfW, innerHalfH, innerCornerR);
+          if (sd <= 0) {
+            if (params.boxMode || params.strokeFillInnerGaps) {
+              activeFgMask[idx] = 1;
+              activeLabels[idx] = lidInnerFillIdx;
+            }
+          } else if (sd <= wallPx) {
+            activeFgMask[idx] = 1;
+            activeLabels[idx] = strokeSlotIdx;
+          }
+        }
+      }
+    }
+  } else {
+    // Organic Contour Outline ('contour')
+    if (useDedicatedStrokeSlot && strokeSlotIdx >= 0) {
+      let minX = width,
+        maxX = 0;
+      let hasFg = false;
+      for (let y = 0; y < height; y++) {
+        const row = y * width;
+        for (let x = 0; x < width; x++) {
+          if (activeFgMask[row + x]) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            hasFg = true;
+          }
+        }
+      }
+
+      if (hasFg) {
+        const fgPxWidth = Math.max(16, maxX - minX);
+        const approxTotalMm = Math.max(15, params.targetWidthMm);
+        computedPxPerMm =
+          fgPxWidth / Math.max(10, approxTotalMm - 2 * effectiveStrokeWidthMm);
+        computedStrokeRadiusPx = Math.max(
+          1.8,
+          Math.min(48, effectiveStrokeWidthMm * computedPxPerMm)
+        );
+        const maxDistSq = computedStrokeRadiusPx * computedStrokeRadiusPx;
+
+        const distSq = computeEuclideanDistanceSq(activeFgMask, width, height);
+
+        for (let i = 0; i < total; i++) {
+          if (!activeFgMask[i] && distSq[i] <= maxDistSq) {
+            activeFgMask[i] = 1;
+            activeLabels[i] = strokeSlotIdx;
+          }
+        }
+
+        if (params.strokeFillInnerGaps || params.boxMode) {
+          const exteriorVisited = new Uint8Array(total);
+          const queue = new Int32Array(total);
+          let head = 0,
+            tail = 0;
+          const pushExt = (idx: number) => {
+            if (!activeFgMask[idx] && !exteriorVisited[idx]) {
+              exteriorVisited[idx] = 1;
+              queue[tail++] = idx;
+            }
+          };
+          for (let x = 0; x < width; x++) {
+            pushExt(x);
+            pushExt((height - 1) * width + x);
+          }
+          for (let y = 0; y < height; y++) {
+            pushExt(y * width);
+            pushExt(y * width + (width - 1));
+          }
+          while (head < tail) {
+            const curr = queue[head++];
+            const cx = curr % width;
+            const cy = (curr - cx) / width;
+            if (cx > 0) pushExt(curr - 1);
+            if (cx < width - 1) pushExt(curr + 1);
+            if (cy > 0) pushExt(curr - width);
+            if (cy < height - 1) pushExt(curr + width);
+          }
+          for (let i = 0; i < total; i++) {
+            if (!activeFgMask[i] && !exteriorVisited[i]) {
+              activeFgMask[i] = 1;
+              activeLabels[i] = strokeSlotIdx;
+            }
+          }
+        }
+      }
+    }
+
+    resolvedMergedRegions = applyManualMergedRegions(
+      activeLabels,
+      activeFgMask,
+      width,
+      height,
+      useDedicatedStrokeSlot ? 5 : params.numColors,
+      params.minIslandPx,
+      params.mergedRegions,
+      resolveTargetSlot,
+      getSlotDisplayHex
+    );
+
+    if (useDedicatedStrokeSlot && strokeSlotIdx >= 0 && computedStrokeRadiusPx > 0) {
+      const exteriorVisited = new Uint8Array(total);
+      const queue = new Int32Array(total);
+      let head = 0,
+        tail = 0;
+      const pushExt = (idx: number) => {
+        if (!activeFgMask[idx] && !exteriorVisited[idx]) {
+          exteriorVisited[idx] = 1;
+          queue[tail++] = idx;
+        }
+      };
+      for (let x = 0; x < width; x++) {
+        pushExt(x);
+        pushExt((height - 1) * width + x);
+      }
+      for (let y = 0; y < height; y++) {
+        pushExt(y * width);
+        pushExt(y * width + (width - 1));
+      }
+      while (head < tail) {
+        const curr = queue[head++];
+        const cx = curr % width;
+        const cy = (curr - cx) / width;
+        if (cx > 0) pushExt(curr - 1);
+        if (cx < width - 1) pushExt(curr + 1);
+        if (cy > 0) pushExt(curr - width);
+        if (cy < height - 1) pushExt(curr + width);
+      }
+
+      if (params.boxMode || params.strokeFillInnerGaps) {
+        for (let i = 0; i < total; i++) {
+          if (!activeFgMask[i] && !exteriorVisited[i]) {
+            activeFgMask[i] = 1;
+            activeLabels[i] = strokeSlotIdx;
+          }
+        }
+      }
+
+      const distFromExtSq = computeEuclideanDistanceSq(exteriorVisited, width, height);
+      const wallCutoffSq = (computedStrokeRadiusPx + 0.35) * (computedStrokeRadiusPx + 0.35);
+
+      const rawLidMask = new Uint8Array(total);
       for (let i = 0; i < total; i++) {
-        if (!activeFgMask[i] && !exteriorVisited[i]) {
-          activeFgMask[i] = 1;
-          activeLabels[i] = strokeSlotIdx;
+        const lbl = activeLabels[i];
+        if (lbl >= 0 && lbl !== strokeSlotIdx) {
+          rawLidMask[i] = 1;
+        } else if (lbl === strokeSlotIdx && distFromExtSq[i] > wallCutoffSq) {
+          rawLidMask[i] = 1;
         }
       }
-    }
 
-    // 2. Compute distance from exterior to separate the outer perimeter box wall from any interior lid bridges
-    const distFromExtSq = computeEuclideanDistanceSq(exteriorVisited, width, height);
-    const wallCutoffSq = (computedStrokeRadiusPx + 0.35) * (computedStrokeRadiusPx + 0.35);
-
-    const rawLidMask = new Uint8Array(total);
-    for (let i = 0; i < total; i++) {
-      const lbl = activeLabels[i];
-      if (lbl >= 0 && lbl !== strokeSlotIdx) {
-        rawLidMask[i] = 1;
-      } else if (lbl === strokeSlotIdx && distFromExtSq[i] > wallCutoffSq) {
-        rawLidMask[i] = 1;
+      const outsideLidVisited = new Uint8Array(total);
+      head = 0;
+      tail = 0;
+      const pushOutsideLid = (idx: number) => {
+        if (!rawLidMask[idx] && !outsideLidVisited[idx]) {
+          outsideLidVisited[idx] = 1;
+          queue[tail++] = idx;
+        }
+      };
+      for (let x = 0; x < width; x++) {
+        pushOutsideLid(x);
+        pushOutsideLid((height - 1) * width + x);
       }
-    }
-
-    // Close any enclosed holes inside rawLidMask so the lid is 100% unified and the box cavity has 0 internal pillars
-    const outsideLidVisited = new Uint8Array(total);
-    head = 0;
-    tail = 0;
-    const pushOutsideLid = (idx: number) => {
-      if (!rawLidMask[idx] && !outsideLidVisited[idx]) {
-        outsideLidVisited[idx] = 1;
-        queue[tail++] = idx;
+      for (let y = 0; y < height; y++) {
+        pushOutsideLid(y * width);
+        pushOutsideLid(y * width + (width - 1));
       }
-    };
-    for (let x = 0; x < width; x++) {
-      pushOutsideLid(x);
-      pushOutsideLid((height - 1) * width + x);
-    }
-    for (let y = 0; y < height; y++) {
-      pushOutsideLid(y * width);
-      pushOutsideLid(y * width + (width - 1));
-    }
-    while (head < tail) {
-      const curr = queue[head++];
-      const cx = curr % width;
-      const cy = (curr - cx) / width;
-      if (cx > 0) pushOutsideLid(curr - 1);
-      if (cx < width - 1) pushOutsideLid(curr + 1);
-      if (cy > 0) pushOutsideLid(curr - width);
-      if (cy < height - 1) pushOutsideLid(curr + width);
-    }
+      while (head < tail) {
+        const curr = queue[head++];
+        const cx = curr % width;
+        const cy = (curr - cx) / width;
+        if (cx > 0) pushOutsideLid(curr - 1);
+        if (cx < width - 1) pushOutsideLid(curr + 1);
+        if (cy > 0) pushOutsideLid(curr - width);
+        if (cy < height - 1) pushOutsideLid(curr + width);
+      }
 
-    const lidCavityMask = new Uint8Array(total);
-    for (let i = 0; i < total; i++) {
-      if (activeFgMask[i] && !outsideLidVisited[i]) {
-        lidCavityMask[i] = 1;
-        if (activeLabels[i] === strokeSlotIdx) {
-          activeLabels[i] = lidInnerFillIdx;
+      const lidCavityMask = new Uint8Array(total);
+      for (let i = 0; i < total; i++) {
+        if (activeFgMask[i] && !outsideLidVisited[i]) {
+          lidCavityMask[i] = 1;
+          if (activeLabels[i] === strokeSlotIdx) {
+            activeLabels[i] = lidInnerFillIdx;
+          }
         }
       }
-    }
 
-    // 3. Compute `innerDeepCavityMask` by stepping inward from `outsideLidVisited` by `boxLedgeWidthMm`
-    const distFromLidEdgeSq = computeEuclideanDistanceSq(outsideLidVisited, width, height);
-    const ledgeMm = Math.max(0.6, params.boxLedgeWidthMm ?? 1.4);
-    const ledgePx = Math.max(1.6, Math.min(32, ledgeMm * computedPxPerMm));
-    const ledgeCutoffSq = ledgePx * ledgePx;
+      const distFromLidEdgeSq = computeEuclideanDistanceSq(outsideLidVisited, width, height);
+      const ledgeMm = Math.max(0.6, params.boxLedgeWidthMm ?? 1.4);
+      const ledgePx = Math.max(1.6, Math.min(32, ledgeMm * computedPxPerMm));
+      const ledgeCutoffSq = ledgePx * ledgePx;
 
-    innerDeepCavityMask = new Uint8Array(total);
-    for (let i = 0; i < total; i++) {
-      if (lidCavityMask[i] && distFromLidEdgeSq[i] > ledgeCutoffSq) {
-        innerDeepCavityMask[i] = 1;
+      innerDeepCavityMask = new Uint8Array(total);
+      for (let i = 0; i < total; i++) {
+        if (lidCavityMask[i] && distFromLidEdgeSq[i] > ledgeCutoffSq) {
+          innerDeepCavityMask[i] = 1;
+        }
       }
     }
   }
@@ -1705,21 +1898,107 @@ export function runMultiColorTracePipeline(
 
   // 6. Trace all colour regions & outer silhouette using the Zero-Gap Shared-Boundary Planar Partition Tracer
   const planarTrace = tracePlanarColorPartition(
-    activeLabels,
+    isGeometricShape && artworkOnlyLabels ? artworkOnlyLabels : activeLabels,
     width,
     height,
-    useDedicatedStrokeSlot ? 6 : params.numColors,
+    isGeometricShape ? params.numColors : useDedicatedStrokeSlot ? 6 : params.numColors,
     {
       smoothEpsilon: params.smoothEpsilon,
       cornerSimplify: params.cornerSimplify,
       fieldBlurPasses: params.fieldBlurPasses,
       minIslandPx: params.minIslandPx,
-      strokeSlotIdx: useDedicatedStrokeSlot ? strokeSlotIdx : undefined,
-      innerDeepCavityMask,
+      strokeSlotIdx:
+        !isGeometricShape && useDedicatedStrokeSlot ? strokeSlotIdx : undefined,
+      innerDeepCavityMask: !isGeometricShape ? innerDeepCavityMask : undefined,
     }
   );
 
-  const silhouettePolygons = planarTrace.silhouettePolygons;
+  // If a Geometric Shape ('square' | 'circle' | 'rectangle') is active, construct exact CAD-smooth
+  // container & lid rings while subtracting the planar-traced artwork silhouette for zero-gap inlays.
+  let finalSilhouettePolygons = planarTrace.silhouettePolygons;
+  let finalLidSilhouettePolygons = planarTrace.lidSilhouettePolygons;
+  let finalLidInnerFillPolygons = useDedicatedStrokeSlot
+    ? planarTrace.layerPolygons[5] || []
+    : [];
+  let finalBoxUpperWallPolygons = planarTrace.boxUpperWallPolygons;
+  let finalBoxLedgeWallPolygons = planarTrace.boxLedgeWallPolygons;
+  let finalBoxInnerPlugPolygons = planarTrace.boxInnerPlugPolygons;
+  let finalCombinedStrokePolygons = planarTrace.combinedStrokePolygons;
+
+  if (isGeometricShape) {
+    const artworkUnionPolys = planarTrace.silhouettePolygons;
+    const outerRing = buildAnalyticRoundedBoxRing(
+      geomCenter.cx,
+      geomCenter.cy,
+      geomOuter.halfW,
+      geomOuter.halfH,
+      geomOuter.cornerR,
+      false
+    );
+    const lidRing = buildAnalyticRoundedBoxRing(
+      geomCenter.cx,
+      geomCenter.cy,
+      geomInner.halfW,
+      geomInner.halfH,
+      geomInner.cornerR,
+      false
+    );
+    const lidHoleRing = buildAnalyticRoundedBoxRing(
+      geomCenter.cx,
+      geomCenter.cy,
+      geomInner.halfW,
+      geomInner.halfH,
+      geomInner.cornerR,
+      true
+    );
+    const deepHoleRing = buildAnalyticRoundedBoxRing(
+      geomCenter.cx,
+      geomCenter.cy,
+      geomDeep.halfW,
+      geomDeep.halfH,
+      geomDeep.cornerR,
+      true
+    );
+
+    const outerArea = Math.abs(computeSignedArea(outerRing));
+    const lidArea = Math.abs(computeSignedArea(lidRing));
+    const deepArea = Math.abs(computeSignedArea(deepHoleRing));
+
+    finalSilhouettePolygons = [{ outer: outerRing, holes: [], area: outerArea }];
+    finalLidSilhouettePolygons = [{ outer: lidRing, holes: [], area: lidArea }];
+    finalBoxUpperWallPolygons = [
+      {
+        outer: outerRing,
+        holes: [lidHoleRing],
+        area: Math.max(1, outerArea - lidArea),
+      },
+    ];
+    finalBoxLedgeWallPolygons = [
+      {
+        outer: outerRing,
+        holes: [deepHoleRing],
+        area: Math.max(1, outerArea - deepArea),
+      },
+    ];
+    finalBoxInnerPlugPolygons = [
+      {
+        outer: lidRing,
+        holes: [deepHoleRing],
+        area: Math.max(1, lidArea - deepArea),
+      },
+    ];
+    finalLidInnerFillPolygons = buildEnclosingFillMinusArtwork(
+      lidRing,
+      artworkUnionPolys,
+      true
+    );
+    finalCombinedStrokePolygons =
+      params.boxMode || params.strokeFillInnerGaps
+        ? buildEnclosingFillMinusArtwork(outerRing, artworkUnionPolys, true)
+        : finalBoxUpperWallPolygons;
+  }
+
+  const silhouettePolygons = finalSilhouettePolygons;
   const layers: TracedColorLayer[] = [];
 
   for (let c = 0; c < params.numColors; c++) {
@@ -1797,7 +2076,7 @@ export function runMultiColorTracePipeline(
       rawPixelCount: pixelCounts[4],
       coveragePercent:
         totalFgPixels > 0 ? Math.round((pixelCounts[4] / totalFgPixels) * 1000) / 10 : 0,
-      polygons: planarTrace.combinedStrokePolygons,
+      polygons: finalCombinedStrokePolygons,
     });
   }
 
@@ -1807,11 +2086,11 @@ export function runMultiColorTracePipeline(
     quantizedImageData,
     foregroundMask: activeFgMask,
     silhouettePolygons,
-    lidSilhouettePolygons: planarTrace.lidSilhouettePolygons,
-    lidInnerFillPolygons: useDedicatedStrokeSlot ? planarTrace.layerPolygons[5] || [] : [],
-    boxUpperWallPolygons: planarTrace.boxUpperWallPolygons,
-    boxLedgeWallPolygons: planarTrace.boxLedgeWallPolygons,
-    boxInnerPlugPolygons: planarTrace.boxInnerPlugPolygons,
+    lidSilhouettePolygons: finalLidSilhouettePolygons,
+    lidInnerFillPolygons: finalLidInnerFillPolygons,
+    boxUpperWallPolygons: finalBoxUpperWallPolygons,
+    boxLedgeWallPolygons: finalBoxLedgeWallPolygons,
+    boxInnerPlugPolygons: finalBoxInnerPlugPolygons,
     layers,
     detectedBgHex: rgbToHex(bgRgb),
     resolvedMergedRegions,

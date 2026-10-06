@@ -1,0 +1,97 @@
+{
+  "entities": {
+    "PrintSubmission": {
+      "title": "PrintSubmission",
+      "description": "A customer 3D print job submission containing contact info, pre-computed metrics, and the complete JSON recipe (CustomizerConfig) for deterministic 3D/2D reconstruction.",
+      "type": "object",
+      "properties": {
+        "refId": {
+          "type": "string",
+          "description": "Ticket reference ID, e.g. NZS-PAR-4829"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Creation timestamp in ms (Date.now())"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Last update timestamp in ms"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["queued", "in_slicer", "printing", "ready", "completed", "cancelled"],
+          "description": "Current workflow status in the Maker Space queue"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Customer full name"
+        },
+        "email": {
+          "type": "string",
+          "description": "Customer email address"
+        },
+        "phoneOrCard": {
+          "type": "string",
+          "description": "Library card number or phone number"
+        },
+        "pickupLocation": {
+          "type": "string",
+          "description": "Selected library pickup branch"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Customer notes or special instructions"
+        },
+        "config": {
+          "type": "object",
+          "description": "Complete JSON recipe of the traced multi-colour 3D model or hollow box"
+        },
+        "signDescription": {
+          "type": "string",
+          "description": "Summary description of the print job"
+        },
+        "approxTotalGrams": {
+          "type": "number",
+          "description": "Estimated filament weight in grams"
+        },
+        "approxMinutes": {
+          "type": "number",
+          "description": "Estimated print duration in minutes"
+        },
+        "costNzd": {
+          "type": "number",
+          "description": "Estimated cost in NZD"
+        },
+        "staffNotes": {
+          "type": "string",
+          "description": "Internal staff notes"
+        },
+        "printedBy": {
+          "type": "string",
+          "description": "Staff member who sliced/printed the job"
+        }
+      },
+      "required": [
+        "refId",
+        "createdAt",
+        "status",
+        "fullName",
+        "email",
+        "pickupLocation",
+        "config",
+        "signDescription",
+        "approxTotalGrams",
+        "approxMinutes",
+        "costNzd"
+      ]
+    }
+  },
+  "firestore": {
+    "/printSubmissions/{submissionId}": {
+      "schema": {
+        "$ref": "#/entities/PrintSubmission"
+      },
+      "description": "Collection of customer print submissions for the Maker Space queue"
+    }
+  }
+}

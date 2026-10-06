@@ -378,7 +378,7 @@ export function buildExtrudedModel(
   if (params.boxMode) {
     const floorThicknessMm = Math.max(0.8, params.baseThicknessMm);
     const lidBaseThicknessMm = Math.max(0.8, params.baseThicknessMm);
-    const lidInlayThicknessMm = Math.max(0.4, params.inlayThicknessMm);
+    const lidInlayThicknessMm = Math.max(0.2, params.inlayThicknessMm);
     const artworkLayers = traceResult.layers.filter(
       (l) => !l.isStrokeAndBase && l.enabled && l.mergedIntoSlot == null
     );
@@ -390,7 +390,7 @@ export function buildExtrudedModel(
         ? lidBaseThicknessMm + Math.max(1, artworkLayers.length - 1) * lidInlayThicknessMm
         : lidBaseThicknessMm + lidInlayThicknessMm;
 
-    const lidStyle = params.boxLidStyle || 'flush_recessed';
+    const lidStyle = params.boxLidStyle || 'cap_with_plug';
     const rimExtraMm = lidStyle === 'raised_rim_recessed' ? 1.2 : 0;
     const minBoxHeightMm = floorThicknessMm + lidTotalThicknessMm + rimExtraMm + 3.0;
     const boxHeightMm = Math.max(minBoxHeightMm, params.boxHeightMm ?? 28.0);
@@ -596,9 +596,12 @@ export function buildExtrudedModel(
         let partZMax = lidZBase + lidTotalThicknessMm;
 
         // Include any enclosed interior gap-fill islands (and outer collar for cap_with_plug) in the backing slot
+        const strokeAndBaseLayer = traceResult.layers.find((l) => l.isStrokeAndBase);
         const extraFillPolys: TracedPolygon[] = isLidBackingSlot
           ? lidStyle === 'cap_with_plug'
-            ? [...traceResult.lidInnerFillPolygons, ...traceResult.boxUpperWallPolygons]
+            ? strokeAndBaseLayer?.polygons && strokeAndBaseLayer.polygons.length > 0
+              ? strokeAndBaseLayer.polygons
+              : [...traceResult.lidInnerFillPolygons, ...traceResult.boxUpperWallPolygons]
             : traceResult.lidInnerFillPolygons
           : [];
         const combinedLayerPolys =
@@ -802,10 +805,22 @@ export function buildExtrudedModel(
   }
 
   // ============================================================================
-  // STANDARD PLAQUE / EMBLEM MODE
+  // ============================================================================
+  // STANDARD PLAQUE / EMBLEM MODE (Built Facing UP for crystal-clear 3D preview)
+  // Non-base colors sit flush on the top surface, strictly 0.4mm thick (2 layers @ 0.2mm).
+  // When exported with flipFaceDown (default true), exporter flips them face-down onto Z = 0..0.4mm.
   // ============================================================================
   const strokeLayer = traceResult.layers.find((l) => l.isStrokeAndBase && l.enabled);
   const activeBaseSlot = strokeLayer ? strokeLayer.slotIndex : activeArtworkBaseSlot;
+
+  // Sign dimensions:
+  // - totalDepth: total sign thickness (e.g. 3.0mm)
+  // - inlayDepth: surface inlay thickness (strictly 0.4mm = 2 layers @ 0.2mm)
+  // - backingThickness: solid silhouette backing plate under the inlays (e.g. 3.0 - 0.4 = 2.6mm)
+  const inlayDepth = Math.max(0.1, params.inlayThicknessMm);
+  const totalDepth = Math.max(inlayDepth + 0.2, params.baseThicknessMm);
+  const backingThickness = Math.max(0.2, totalDepth - inlayDepth);
+  const topSurfaceZ = totalDepth;
 
   for (const layer of traceResult.layers) {
     if (!layer.enabled || layer.mergedIntoSlot != null) continue;
@@ -822,119 +837,174 @@ export function buildExtrudedModel(
     };
 
     let zMin = 0;
-    let zMax = params.baseThicknessMm;
+    let zMax = topSurfaceZ;
 
-    // When Logo Stroke & Base is enabled, the stroke layer always forms the full underlying base (0 -> baseThicknessMm)
-    // AND wraps around the logo perimeter up to the top surface (or raised rim).
     if (params.strokeEnabled && params.strokeWidthMm > 0) {
-      const topZ = params.baseThicknessMm + params.inlayThicknessMm;
+      // ------------------------------------------------------------------------
+      // STROKE & BASE EMBLEM MODE (Facing UP)
+      // ------------------------------------------------------------------------
       if (layer.isStrokeAndBase) {
         zMin = 0;
-        // 1. Solid unified base underneath the entire design (logo + stroke)
+        // 1. Solid unified silhouette backing plate underneath (0 -> backingThickness)
         const baseSilhouetteMesh = extrudePolygonsToManifold(
           traceResult.silhouettePolygons,
           transformPt,
           0,
-          params.baseThicknessMm,
+          backingThickness,
           0
         );
         appendMesh(baseSilhouetteMesh);
 
-        // 2. Outer Stroke Outline rising around the logo perimeter
+        // 2. Front perimeter collar and inner fill flush with top surface
         if (params.strokeProfileStyle !== 'stepped_base_only') {
-          const strokeTopZ =
-            params.strokeProfileStyle === 'raised_rim_and_base' ? topZ + 0.6 : topZ;
-          zMax = strokeTopZ;
-          const strokeCollarMesh = extrudePolygonsToManifold(
-            layer.polygons,
-            transformPt,
-            params.baseThicknessMm,
-            strokeTopZ,
-            params.seamOverlapMm
-          );
-          appendMesh(strokeCollarMesh);
+          if (
+            params.strokeProfileStyle === 'raised_rim_and_base' &&
+            traceResult.boxUpperWallPolygons.length > 0
+          ) {
+            const rimTopZ = topSurfaceZ + 0.6;
+            zMax = rimTopZ;
+            // Inner margin / gap fill stays flush with the inlay surface
+            if (traceResult.lidInnerFillPolygons.length > 0) {
+              appendMesh(
+                extrudePolygonsToManifold(
+                  traceResult.lidInnerFillPolygons,
+                  transformPt,
+                  backingThickness,
+                  topSurfaceZ,
+                  params.seamOverlapMm
+                )
+              );
+            }
+            // Outer border ring rises above the inlay surface
+            appendMesh(
+              extrudePolygonsToManifold(
+                traceResult.boxUpperWallPolygons,
+                transformPt,
+                backingThickness,
+                rimTopZ,
+                params.seamOverlapMm
+              )
+            );
+          } else {
+            zMax = topSurfaceZ;
+            const strokeCollarMesh = extrudePolygonsToManifold(
+              layer.polygons,
+              transformPt,
+              backingThickness,
+              topSurfaceZ,
+              params.seamOverlapMm
+            );
+            appendMesh(strokeCollarMesh);
+            if (traceResult.lidInnerFillPolygons.length > 0) {
+              appendMesh(
+                extrudePolygonsToManifold(
+                  traceResult.lidInnerFillPolygons,
+                  transformPt,
+                  backingThickness,
+                  topSurfaceZ,
+                  params.seamOverlapMm
+                )
+              );
+            }
+          }
         } else {
-          zMax = params.baseThicknessMm;
+          zMax = backingThickness;
         }
       } else {
-        // Interior logo colour layers sit on top of the stroke base (baseThicknessMm -> topZ)
-        zMin = params.baseThicknessMm;
-        zMax = topZ;
+        // Interior artwork color layers sit flush on top of backing plate: strictly 0.4mm thick (backingThickness -> topSurfaceZ)
+        zMin = backingThickness;
+        zMax = topSurfaceZ;
         const inlayMesh = extrudePolygonsToManifold(
           layer.polygons,
           transformPt,
-          params.baseThicknessMm,
-          topZ,
+          backingThickness,
+          topSurfaceZ,
           params.seamOverlapMm
         );
         appendMesh(inlayMesh);
       }
     } else if (params.extrusionMode === 'full_flush') {
-      // Every colour is extruded full height from Z = 0 to Z = baseThicknessMm
+      // Every active color extrudes full depth from Z = 0 to Z = totalDepth
       zMin = 0;
-      zMax = params.baseThicknessMm;
+      zMax = totalDepth;
       const m = extrudePolygonsToManifold(
         layer.polygons,
         transformPt,
-        zMin,
-        zMax,
+        0,
+        totalDepth,
         params.seamOverlapMm
       );
       appendMesh(m);
-    } else if (params.extrusionMode === 'backed_inlay') {
-      // The designated Base Slot forms the unified silhouette backing (0 -> baseThicknessMm)
-      // plus its own top colour layer (baseThicknessMm -> baseThicknessMm + inlayThicknessMm)
-      const topZ = params.baseThicknessMm + params.inlayThicknessMm;
+    } else if (params.extrusionMode === 'stepped_relief') {
+      // Stepped relief Inkscape stack
+      const step = inlayDepth;
       if (layer.slotIndex === activeBaseSlot) {
         zMin = 0;
-        zMax = topZ;
+        zMax = totalDepth;
+        appendMesh(
+          extrudePolygonsToManifold(
+            traceResult.silhouettePolygons,
+            transformPt,
+            0,
+            totalDepth,
+            0
+          )
+        );
+      } else {
+        zMin = backingThickness;
+        zMax = Math.min(totalDepth + 1.2, backingThickness + layer.slotIndex * step);
+        appendMesh(
+          extrudePolygonsToManifold(
+            layer.polygons,
+            transformPt,
+            zMin,
+            zMax,
+            params.seamOverlapMm
+          )
+        );
+      }
+    } else {
+      // ------------------------------------------------------------------------
+      // BACKED SILHOUETTE + SURFACE INLAY (Standard Street Sign default, Facing UP)
+      // Total height = totalDepth (e.g. 3.0mm)
+      // Inlays = strictly inlayDepth (0.4mm thick, exactly 2 layers @ 0.2mm)
+      // Backing = backingThickness (e.g. 2.6mm solid silhouette)
+      // ------------------------------------------------------------------------
+      if (layer.slotIndex === activeBaseSlot) {
+        zMin = 0;
+        zMax = topSurfaceZ;
+        // 1. Solid unified silhouette backing plate behind everything (0 -> backingThickness)
         const baseSilhouetteMesh = extrudePolygonsToManifold(
           traceResult.silhouettePolygons,
           transformPt,
           0,
-          params.baseThicknessMm,
+          backingThickness,
           0
         );
         appendMesh(baseSilhouetteMesh);
 
-        const topLayerMesh = extrudePolygonsToManifold(
+        // 2. Front surface tiles of the base color flush with the inlays (backingThickness -> topSurfaceZ)
+        const baseTopMesh = extrudePolygonsToManifold(
           layer.polygons,
           transformPt,
-          params.baseThicknessMm,
-          topZ,
+          backingThickness,
+          topSurfaceZ,
           params.seamOverlapMm
         );
-        appendMesh(topLayerMesh);
+        appendMesh(baseTopMesh);
       } else {
-        zMin = params.baseThicknessMm;
-        zMax = topZ;
+        // Any non-base color: strictly inlayDepth (0.4mm) on the surface (backingThickness -> topSurfaceZ)
+        zMin = backingThickness;
+        zMax = topSurfaceZ;
         const inlayMesh = extrudePolygonsToManifold(
           layer.polygons,
           transformPt,
-          params.baseThicknessMm,
-          topZ,
+          backingThickness,
+          topSurfaceZ,
           params.seamOverlapMm
         );
         appendMesh(inlayMesh);
       }
-    } else if (params.extrusionMode === 'stepped_relief') {
-      // Cumulative Inkscape stack where each colour steps up by inlayThicknessMm
-      const step = params.inlayThicknessMm;
-      if (layer.slotIndex === 0) {
-        zMin = 0;
-        zMax = params.baseThicknessMm;
-      } else {
-        zMin = params.baseThicknessMm + (layer.slotIndex - 1) * step;
-        zMax = zMin + step;
-      }
-      const stepMesh = extrudePolygonsToManifold(
-        layer.polygons,
-        transformPt,
-        zMin,
-        zMax,
-        params.seamOverlapMm
-      );
-      appendMesh(stepMesh);
     }
 
     if (combinedVertices.length > 0 && combinedTriangles.length > 0) {
@@ -949,6 +1019,7 @@ export function buildExtrudedModel(
         offsetX: 0,
         lidZMin: 0,
         lidZMax: maxZHeight,
+        isPreFlippedFaceDown: false,
         vertices: combinedVertices,
         triangles: combinedTriangles,
         zMin,
