@@ -315,11 +315,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           ? { boxPlateLayout: 'side_by_side' as const, boxLidLiftMm: 0 }
           : undefined;
 
-      const { extrudedModel } = await reconstructFromConfig(cfg, exportOverride);
+      const { traceResult, extrudedModel } = await reconstructFromConfig(cfg, exportOverride);
+      const activeSlotConfigs = cfg.slotConfigs.map((c) => {
+        const layer = traceResult?.layers.find((l) => l.slotIndex === c.id);
+        if (layer) {
+          return {
+            ...c,
+            printHex: layer.printHex,
+            detectedHex: layer.detectedHex,
+            enabled: layer.enabled,
+            mergedIntoSlot: layer.mergedIntoSlot,
+          };
+        }
+        return c;
+      });
       const blob = await generateBambu3mfBlob(extrudedModel, {
         projectName: `${submission.refId}_${cfg.projectName}`,
         flipFaceDown: cfg.flipFaceDown ?? true,
-        slotConfigs: cfg.slotConfigs,
+        slotConfigs: activeSlotConfigs,
         snapToOfficialBambuHex: cfg.snapToOfficialBambuHex,
         colorFormat: cfg.bambuColorFormat || 'bambu_project',
       });

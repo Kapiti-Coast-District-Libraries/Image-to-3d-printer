@@ -44,6 +44,12 @@ import {
 } from './components/VectorInspector2D';
 import { SendToMakerSpaceModal } from './components/SendToMakerSpaceModal';
 import { AdminDashboard } from './components/AdminDashboard';
+import { ProjectModeSection } from './components/ProjectModeSection';
+import { SourceArtworkSection } from './components/SourceArtworkSection';
+import { PrintSizeSection } from './components/PrintSizeSection';
+import { FilamentColorsSection } from './components/FilamentColorsSection';
+import { CleanupSection } from './components/CleanupSection';
+import { VectorTraceSection } from './components/VectorTraceSection';
 import { CustomizerConfig } from './types';
 import { computePrintEstimate, loadConfigImageData } from './lib/printEstimator';
 import { subscribeToSubmissions } from './services/submissionService';
@@ -68,10 +74,13 @@ import {
   ShieldCheck,
   Layers,
   Sliders,
+  Ruler,
+  LayoutGrid,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 
 type MainViewMode = '3d_plate' | 'vector_paths' | 'quantized_flat' | 'side_by_side';
-type ControlsTab = 'all' | 'trace' | 'colors_box' | 'extrusion';
 
 const BAMBU_FILAMENT_SWATCHES = [
   { name: 'Charcoal Black', hex: '#141821' },
@@ -90,7 +99,6 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [activeView, setActiveView] = useState<MainViewMode>('3d_plate');
-  const [controlsTab, setControlsTab] = useState<ControlsTab>('all');
   const [projectName, setProjectName] = useState<string>('Kitsune_Emblem_4Color');
   const [activeSampleId, setActiveSampleId] = useState<string>('kitsune_emblem');
   const [sourceImageData, setSourceImageData] = useState<ImageData | null>(null);
@@ -116,15 +124,17 @@ export default function App() {
     fieldBlurPasses: 1,
     closeColorGaps: true,
     seamOverlapMm: 0.0,
-    strokeEnabled: false,
-    strokeShape: 'contour',
+    strokeEnabled: true,
+    strokeShape: 'rectangle',
     shapePaddingMm: 3.5,
     shapeCornerRadiusMm: 4.0,
+    rectDepthMm: 65,
+    logoScalePercent: 85,
     strokeWidthMm: 2.5,
     strokeColorHex: '#F8FAFC',
     strokeFillInnerGaps: true,
     strokeProfileStyle: 'flush_top_and_base',
-    boxMode: false,
+    boxMode: true,
     boxHeightMm: 28,
     boxLidStyle: 'cap_with_plug',
     boxLidToleranceMm: 0.2,
@@ -132,6 +142,11 @@ export default function App() {
     boxPlateLayout: 'assembled',
     boxLidLiftMm: 16,
     boxExportParts: 'both',
+    boxDividersEnabled: true,
+    boxDividerCols: 2,
+    boxDividerRows: 2,
+    boxDividerThicknessMm: 1.0,
+    boxDividerHeightRatio: 1.0,
     extrusionMode: 'backed_inlay',
     targetWidthMm: 95,
     baseThicknessMm: 3.0,
@@ -198,8 +213,24 @@ export default function App() {
     useState<Bambu3mfColorFormat>('bambu_project');
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportSuccessText, setExportSuccessText] = useState<string | null>(null);
-  const [openColorPickerSlot, setOpenColorPickerSlot] = useState<number | null>(null);
   const [showStlModal, setShowStlModal] = useState<boolean>(false);
+  const [openColorPickerSlot, setOpenColorPickerSlot] = useState<number | null>(null);
+  const [isColorsExpanded, setIsColorsExpanded] = useState<boolean>(false);
+  const [isCleanupExpanded, setIsCleanupExpanded] = useState<boolean>(false);
+  const [isVectorTraceExpanded, setIsVectorTraceExpanded] = useState<boolean>(false);
+
+  // Auto-expand advanced sections if an interactive tool is activated
+  useEffect(() => {
+    if (openColorPickerSlot !== null) {
+      setIsColorsExpanded(true);
+    }
+  }, [openColorPickerSlot]);
+
+  useEffect(() => {
+    if (mergeItemMode || eyedropperTarget === 'remove_color') {
+      setIsCleanupExpanded(true);
+    }
+  }, [mergeItemMode, eyedropperTarget]);
 
   // Subscribe to queued order count badge
   useEffect(() => {
@@ -370,11 +401,18 @@ export default function App() {
     params.cornerSimplify,
     params.fieldBlurPasses,
     params.closeColorGaps,
+    params.seamOverlapMm,
     params.strokeEnabled,
-    params.boxMode,
+    params.strokeShape,
+    params.rectDepthMm,
+    params.logoScalePercent,
+    params.shapePaddingMm,
+    params.shapeCornerRadiusMm,
     params.strokeWidthMm,
     params.strokeColorHex,
     params.strokeFillInnerGaps,
+    params.strokeProfileStyle,
+    params.boxMode,
     params.boxLedgeWidthMm,
     params.targetWidthMm,
     params.extrusionMode,
@@ -588,10 +626,24 @@ export default function App() {
             })
           : extrudedModel;
 
+      const activeSlotConfigs = slotConfigs.map((cfg) => {
+        const layer = traceResult?.layers.find((l) => l.slotIndex === cfg.id);
+        if (layer) {
+          return {
+            ...cfg,
+            printHex: layer.printHex,
+            detectedHex: layer.detectedHex,
+            enabled: layer.enabled,
+            mergedIntoSlot: layer.mergedIntoSlot,
+          };
+        }
+        return cfg;
+      });
+
       const blob = await generateBambu3mfBlob(modelForExport, {
         projectName,
         flipFaceDown,
-        slotConfigs,
+        slotConfigs: activeSlotConfigs,
         snapToOfficialBambuHex,
         colorFormat: bambuColorFormat,
       });
@@ -952,7 +1004,7 @@ export default function App() {
         ===================================================================== */}
         <aside className="lg:col-span-5 bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden flex flex-col lg:max-h-[calc(100vh-108px)]">
           {/* Panel Header Bar */}
-          <div className="bg-slate-50/80 border-b border-slate-200 px-5 py-3.5 space-y-2.5 shrink-0">
+          <div className="bg-slate-50/80 border-b border-slate-200 px-5 py-3.5 shrink-0">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-teal-700" />
@@ -964,1790 +1016,88 @@ export default function App() {
                 {params.boxMode ? 'Hollow Box + Lid' : 'Multi-Colour Plaque'}
               </span>
             </div>
-
-            {/* Quick Section Filter Tabs */}
-            <div className="grid grid-cols-4 gap-1 bg-slate-200/70 p-1 rounded-xl">
-              {(
-                [
-                  ['all', 'All Steps'],
-                  ['trace', '1–3 Trace'],
-                  ['colors_box', '4–5 Box/AMS'],
-                  ['extrusion', '6 Extrude'],
-                ] as [ControlsTab, string][]
-              ).map(([tab, label]) => {
-                const active = controlsTab === tab;
-                return (
-                  <button
-                    key={tab}
-                    type="button"
-                    onClick={() => setControlsTab(tab)}
-                    className={`py-1 px-2 rounded-lg text-[11px] font-semibold transition-all cursor-pointer truncate ${
-                      active
-                        ? 'bg-white text-blue-700 shadow-2xs border border-slate-200/80'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
           </div>
 
           {/* Scrollable Controls Body */}
-          <div className="p-5 space-y-6 overflow-y-auto flex-1">
-            {(controlsTab === 'all' || controlsTab === 'trace') && (
-              <>
-                {/* Section 01: Artwork Source & Sample Presets */}
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold text-slate-800">
-                      01. Source Artwork &amp; Presets
-                    </h3>
-                    <span className="text-[11px] font-mono text-slate-500">
-                      PNG · JPG · Paste
-                    </span>
-                  </div>
+          <div className="p-5 space-y-4 overflow-y-auto flex-1">
+            {/* 01. Project Mode: 3D Box + Lid vs Flat Badge */}
+            <ProjectModeSection
+              params={params}
+              setParams={setParams}
+              traceResult={traceResult}
+            />
 
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full py-3.5 px-4 rounded-xl border-2 border-dashed border-slate-300 hover:border-blue-500 bg-slate-50/70 hover:bg-blue-50/30 transition-colors flex flex-col items-center justify-center text-center cursor-pointer"
-                  >
-                    <Upload className="w-4 h-4 text-blue-600 mb-1" />
-                    <span className="text-xs font-semibold text-slate-800">
-                      Drop image or click to browse
-                    </span>
-                    <span className="text-xs text-slate-500 mt-0.5">
-                      Auto-flattens gradients to 4 AMS colours
-                    </span>
-                  </button>
+            {/* 02. Source Artwork */}
+            <SourceArtworkSection
+              fileInputRef={fileInputRef}
+              samples={SAMPLE_ARTWORKS}
+              activeSampleId={activeSampleId}
+              onSelectSample={loadSampleArtwork}
+            />
 
-                  <div>
-                    <div className="text-xs text-slate-500 mb-1.5">
-                      Or test with a multi-shade sample:
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {SAMPLE_ARTWORKS.map((sample) => {
-                        const active = activeSampleId === sample.id;
-                        return (
-                          <button
-                            key={sample.id}
-                            type="button"
-                            onClick={() => loadSampleArtwork(sample)}
-                            className={`px-3 py-2 rounded-xl text-left border transition-all cursor-pointer ${
-                              active
-                                ? 'bg-blue-50 text-blue-700 border-blue-300 ring-2 ring-blue-500/20'
-                                : 'bg-slate-50/70 border-slate-200 text-slate-700 hover:bg-slate-100'
-                            }`}
-                          >
-                            <div className="text-xs font-semibold truncate">
-                              {sample.title}
-                            </div>
-                            <div className="flex items-center gap-1 mt-1">
-                              {sample.recommendedSlots.map((hex, i) => (
-                                <span
-                                  key={i}
-                                  className="w-2.5 h-2.5 rounded-full border border-slate-300"
-                                  style={{ backgroundColor: hex }}
-                                />
-                              ))}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </section>
+            {/* 03. Print Size & Thickness */}
+            <PrintSizeSection
+              params={params}
+              setParams={setParams}
+              extrudedModel={extrudedModel}
+              traceResult={traceResult}
+            />
 
-                <hr className="border-slate-200" />
+            {/* 04. Bambu AMS Filament Colours (Collapsible) */}
+            <FilamentColorsSection
+              params={params}
+              setParams={setParams}
+              slotConfigs={slotConfigs}
+              setSlotConfigs={setSlotConfigs}
+              traceResult={traceResult}
+              highlightedSlot={highlightedSlot}
+              setHighlightedSlot={setHighlightedSlot}
+              openColorPickerSlot={openColorPickerSlot}
+              setOpenColorPickerSlot={setOpenColorPickerSlot}
+              eyedropperTarget={eyedropperTarget}
+              activateEyedropper={activateEyedropper}
+              handleToggleSlotEnabled={handleToggleSlotEnabled}
+              handleMergeSlotInto={handleMergeSlotInto}
+              handleUnmergeAllSlots={handleUnmergeAllSlots}
+              handleSnapAllToBambuFilaments={handleSnapAllToBambuFilaments}
+              closestMergeablePair={closestMergeablePair}
+              isExpanded={isColorsExpanded}
+              onToggleExpand={() => setIsColorsExpanded((v) => !v)}
+            />
 
-                {/* Section 02: Choose Colour(s) to Remove & Click-to-Merge Item */}
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold text-slate-800">
-                      02. Background &amp; Region Cleanup
-                    </h3>
-                    {traceResult && (
-                      <div className="flex items-center gap-1.5 text-[11px] text-slate-500 font-mono">
-                        <span>Auto BG</span>
-                        <span
-                          className="w-3.5 h-3.5 rounded border border-slate-300 inline-block"
-                          style={{ backgroundColor: traceResult.detectedBgHex }}
-                        />
-                      </div>
-                    )}
-                  </div>
+            {/* 05. Background & Region Cleanup (Collapsible) */}
+            <CleanupSection
+              params={params}
+              setParams={setParams}
+              traceResult={traceResult}
+              slotConfigs={slotConfigs}
+              imageSwatches={imageSwatches}
+              isSwatchRemoved={isSwatchRemoved}
+              addOrToggleRemovedColor={addOrToggleRemovedColor}
+              eyedropperTarget={eyedropperTarget}
+              activateEyedropper={activateEyedropper}
+              mergeItemMode={mergeItemMode}
+              handleToggleMergeItemMode={handleToggleMergeItemMode}
+              mergedRegionsCount={mergedRegionsCount}
+              handleUndoLastMergedRegion={handleUndoLastMergedRegion}
+              handleClearMergedRegions={handleClearMergedRegions}
+              mergeItemTargetMode={mergeItemTargetMode}
+              setMergeItemTargetMode={setMergeItemTargetMode}
+              handleUpdateMergedRegionTarget={handleUpdateMergedRegionTarget}
+              handleRemoveMergedRegionById={handleRemoveMergedRegionById}
+              isExpanded={isCleanupExpanded}
+              onToggleExpand={() => setIsCleanupExpanded((v) => !v)}
+            />
 
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Click any detected image colour below to strip it from the trace, or use{' '}
-                    <strong className="text-slate-700">Merge Item</strong> to absorb unwanted small details into their surrounding colour.
-                  </p>
-
-                  {/* Quick-Click Detected Image Swatches */}
-                  {imageSwatches.length > 0 && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
-                      <div className="flex items-center justify-between text-[11px] text-slate-500">
-                        <span className="font-medium">
-                          Detected Image Colours (Click to Remove)
-                        </span>
-                        {params.removedColors.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => setParams((p) => ({ ...p, removedColors: [] }))}
-                            className="text-blue-600 font-semibold hover:underline cursor-pointer"
-                          >
-                            Restore All
-                          </button>
-                        )}
-                      </div>
-
-                      <div className="grid grid-cols-7 gap-1.5">
-                        {imageSwatches.map((sw, idx) => {
-                          const removed = isSwatchRemoved(sw);
-                          return (
-                            <button
-                              key={idx}
-                              type="button"
-                              onClick={() => addOrToggleRemovedColor(sw.rgb, 'global')}
-                              className={`group relative h-8 rounded-lg border transition-transform cursor-pointer flex items-center justify-center overflow-hidden ${
-                                removed
-                                  ? 'border-red-500 ring-2 ring-red-500/30 scale-95 opacity-75'
-                                  : 'border-slate-300 hover:scale-105 hover:border-slate-500'
-                              }`}
-                              style={{ backgroundColor: sw.hex }}
-                              title={`${sw.hex} (${sw.percent}% of image) — Click to ${
-                                removed ? 'restore to print' : 'remove from print/trace'
-                              }`}
-                            >
-                              {removed && (
-                                <div className="inset-0 bg-slate-900/60 flex items-center justify-center w-full h-full">
-                                  <X className="w-4 h-4 text-red-200 stroke-[2.5]" />
-                                </div>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Interactive Eyedropper Button */}
-                  <button
-                    type="button"
-                    onClick={() => activateEyedropper('remove_color')}
-                    className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-                      eyedropperTarget === 'remove_color'
-                        ? 'bg-red-50 border-red-300 text-red-700 ring-2 ring-red-500/20'
-                        : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700'
-                    }`}
-                  >
-                    <Eraser className="w-3.5 h-3.5 text-red-500" />
-                    <span>
-                      {eyedropperTarget === 'remove_color'
-                        ? 'Click Any Colour on Image to Remove...'
-                        : 'Pick Colour on Image to Remove'}
-                    </span>
-                  </button>
-
-                  {/* Manual Click-to-Merge Item / Detail into Surrounding Colour */}
-                  <div className="bg-teal-50/50 border border-teal-200 rounded-xl p-3 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-bold text-teal-900 flex items-center gap-1.5">
-                        <MousePointerClick className="w-3.5 h-3.5 text-teal-700" />
-                        <span>Merge Individual Item / Detail</span>
-                      </span>
-                      {mergedRegionsCount > 0 && (
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={handleUndoLastMergedRegion}
-                            className="text-[10px] font-semibold text-teal-800 bg-white hover:bg-teal-50 px-2 py-0.5 rounded border border-teal-200 cursor-pointer flex items-center gap-1"
-                            title="Undo last merged item"
-                          >
-                            <Undo2 className="w-2.5 h-2.5" />
-                            <span>Undo</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleClearMergedRegions}
-                            className="text-[10px] font-semibold text-slate-500 hover:text-red-600 px-1.5 py-0.5 rounded cursor-pointer"
-                            title="Restore all manually merged items"
-                          >
-                            Reset
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleToggleMergeItemMode}
-                      className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-                        mergeItemMode
-                          ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
-                          : 'bg-white hover:bg-teal-50 border-teal-300 text-teal-800'
-                      }`}
-                    >
-                      <MousePointerClick className="w-3.5 h-3.5" />
-                      <span>
-                        {mergeItemMode
-                          ? 'Merge Item Active — Click Detail on 3D/2D'
-                          : 'Merge Item (Click Detail to Absorb)'}
-                      </span>
-                    </button>
-
-                    {/* Target Mode Selector for Click-to-Merge */}
-                    <div className="grid grid-cols-3 gap-1 bg-white p-1 rounded-lg border border-slate-200">
-                      <button
-                        type="button"
-                        onClick={() => setMergeItemTargetMode('surrounding')}
-                        className={`px-2 py-1 rounded text-[10px] font-semibold transition-colors cursor-pointer truncate ${
-                          mergeItemTargetMode === 'surrounding'
-                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                            : 'text-slate-500 hover:text-slate-800'
-                        }`}
-                      >
-                        Surrounding
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setMergeItemTargetMode(params.baseSlotIndex)}
-                        className={`px-2 py-1 rounded text-[10px] font-semibold transition-colors cursor-pointer truncate ${
-                          typeof mergeItemTargetMode === 'number'
-                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                            : 'text-slate-500 hover:text-slate-800'
-                        }`}
-                      >
-                        {typeof mergeItemTargetMode === 'number'
-                          ? `Slot ${mergeItemTargetMode + 1}`
-                          : 'Specific Slot'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setMergeItemTargetMode('cutout')}
-                        className={`px-2 py-1 rounded text-[10px] font-semibold transition-colors cursor-pointer truncate ${
-                          mergeItemTargetMode === 'cutout'
-                            ? 'bg-red-50 text-red-700 border border-red-200'
-                            : 'text-slate-500 hover:text-slate-800'
-                        }`}
-                      >
-                        Cutout Hole
-                      </button>
-                    </div>
-
-                    {typeof mergeItemTargetMode === 'number' && (
-                      <div className="grid grid-cols-4 gap-1 pt-0.5">
-                        {Array.from({ length: params.numColors }).map((_, idx) => {
-                          const layerHex =
-                            traceResult?.layers[idx]?.printHex ||
-                            slotConfigs[idx]?.printHex ||
-                            '#334155';
-                          const active = mergeItemTargetMode === idx;
-                          return (
-                            <button
-                              key={idx}
-                              type="button"
-                              onClick={() => setMergeItemTargetMode(idx)}
-                              className={`flex items-center justify-center gap-1 py-1 rounded border text-[10px] font-mono cursor-pointer ${
-                                active
-                                  ? 'bg-blue-50 border-blue-400 text-blue-800 font-bold'
-                                  : 'bg-white border-slate-200 text-slate-600'
-                              }`}
-                            >
-                              <span
-                                className="w-2 h-2 rounded-full border border-slate-400"
-                                style={{ backgroundColor: layerHex }}
-                              />
-                              <span>S{idx + 1}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    {/* Active Manually Merged Items List */}
-                    {traceResult && traceResult.resolvedMergedRegions.length > 0 && (
-                      <div className="space-y-1.5 pt-1 border-t border-teal-200/70">
-                        <div className="flex items-center justify-between text-[10px] text-slate-500">
-                          <span>Merged Items ({traceResult.resolvedMergedRegions.length})</span>
-                          <span>Click × to restore</span>
-                        </div>
-                        <div className="max-h-32 overflow-y-auto space-y-1 pr-0.5">
-                          {traceResult.resolvedMergedRegions.map((item, idx) => (
-                            <div
-                              key={item.id}
-                              className="flex items-center justify-between gap-1.5 bg-white border border-slate-200 rounded-lg px-2 py-1 text-[11px]"
-                            >
-                              <div className="flex items-center gap-1.5 min-w-0">
-                                <span className="text-[10px] font-mono text-slate-400">
-                                  #{idx + 1}
-                                </span>
-                                <span
-                                  className="w-3 h-3 rounded-xs border border-slate-300 shrink-0"
-                                  style={{ backgroundColor: item.sourceHex }}
-                                />
-                                <ArrowRight className="w-3 h-3 text-slate-400 shrink-0" />
-                                <span
-                                  className="w-3 h-3 rounded-xs border border-slate-300 shrink-0"
-                                  style={{ backgroundColor: item.targetHex }}
-                                />
-                                <span className="text-[10px] text-slate-700 font-medium truncate">
-                                  {item.resolvedTargetSlot === -1
-                                    ? 'Cutout'
-                                    : item.resolvedTargetSlot === 4
-                                    ? 'Into Box/Stroke'
-                                    : `Slot ${item.resolvedTargetSlot + 1}`}
-                                </span>
-                              </div>
-
-                              <div className="flex items-center gap-1 shrink-0">
-                                <select
-                                  value={String(item.targetMode)}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    const parsed: MergeItemTargetMode =
-                                      val === 'surrounding'
-                                        ? 'surrounding'
-                                        : val === 'cutout'
-                                        ? 'cutout'
-                                        : parseInt(val, 10);
-                                    handleUpdateMergedRegionTarget(item.id, parsed);
-                                  }}
-                                  className="bg-slate-50 border border-slate-200 rounded px-1 py-0.5 text-[10px] text-slate-700 cursor-pointer"
-                                >
-                                  <option value="surrounding">Auto Surround</option>
-                                  {Array.from({ length: params.numColors }).map((_, sIdx) => (
-                                    <option key={sIdx} value={String(sIdx)}>
-                                      Slot {sIdx + 1}
-                                    </option>
-                                  ))}
-                                  <option value="cutout">Cutout</option>
-                                </select>
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveMergedRegionById(item.id)}
-                                  className="p-0.5 text-slate-400 hover:text-red-600 rounded cursor-pointer"
-                                >
-                                  <X className="w-3 h-3" />
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Exterior Background Mode Selector */}
-                  <div className="pt-1 space-y-2">
-                    <div className="text-xs font-medium text-slate-600">
-                      Automatic Border Background Mode
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {(
-                        [
-                          ['perimeter_flood', 'Exterior Flood'],
-                          ['global_color', 'Global + Holes'],
-                          ['alpha_only', 'Alpha PNG Only'],
-                          ['none', 'Keep Full Box'],
-                        ] as const
-                      ).map(([mode, label]) => {
-                        const active = params.bgRemovalMode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => setParams((p) => ({ ...p, bgRemovalMode: mode }))}
-                            className={`px-2.5 py-1.5 text-xs font-semibold rounded-xl border transition-all cursor-pointer ${
-                              active
-                                ? 'bg-blue-50 text-blue-700 border-blue-300 ring-2 ring-blue-500/20'
-                                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                            }`}
-                          >
-                            {label}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {params.bgRemovalMode !== 'none' &&
-                      params.bgRemovalMode !== 'alpha_only' && (
-                        <div>
-                          <div className="flex items-center justify-between text-xs mb-1">
-                            <span className="text-slate-600">Auto Border Tolerance</span>
-                            <span className="font-mono font-semibold text-slate-800">
-                              {params.bgTolerance}%
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min={2}
-                            max={75}
-                            step={1}
-                            value={params.bgTolerance}
-                            onChange={(e) =>
-                              setParams((p) => ({
-                                ...p,
-                                bgTolerance: parseInt(e.target.value, 10),
-                              }))
-                            }
-                            className="w-full accent-blue-600 cursor-pointer"
-                          />
-                        </div>
-                      )}
-                  </div>
-                </section>
-
-                <hr className="border-slate-200" />
-
-                {/* Section 03: Inkscape-Style Vector Tracing Controls */}
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold text-slate-800">
-                      03. Inkscape Vector Trace Engine
-                    </h3>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setParams((p) => ({
-                          ...p,
-                          smoothEpsilon: 1.15,
-                          cornerSimplify: 0.32,
-                          despeckleLevel: 1,
-                          minIslandPx: 18,
-                          fieldBlurPasses: 1,
-                          closeColorGaps: true,
-                          seamOverlapMm: 0.0,
-                        }))
-                      }
-                      className="text-[11px] font-semibold text-slate-500 hover:text-blue-600 flex items-center gap-1 cursor-pointer"
-                    >
-                      <RotateCcw className="w-3 h-3" />
-                      <span>Reset</span>
-                    </button>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-slate-600">Curve Smoothness (Chaikin Spline)</span>
-                      <span className="font-mono font-semibold text-teal-700">
-                        {params.smoothEpsilon.toFixed(2)}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={2.4}
-                      step={0.05}
-                      value={params.smoothEpsilon}
-                      onChange={(e) =>
-                        setParams((p) => ({ ...p, smoothEpsilon: parseFloat(e.target.value) }))
-                      }
-                      className="w-full accent-blue-600 cursor-pointer"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-slate-600">Shade &amp; Gradient Flattening</span>
-                      <span className="font-mono font-semibold text-slate-700">
-                        {params.despeckleLevel === 0
-                          ? 'Off'
-                          : `Level ${params.despeckleLevel}`}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={3}
-                      step={1}
-                      value={params.despeckleLevel}
-                      onChange={(e) =>
-                        setParams((p) => ({
-                          ...p,
-                          despeckleLevel: parseInt(e.target.value, 10),
-                        }))
-                      }
-                      className="w-full accent-blue-600 cursor-pointer"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-slate-600">Suppress Speckles (Min Island)</span>
-                      <span className="font-mono font-semibold text-slate-700">
-                        {params.minIslandPx} px²
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={4}
-                      max={80}
-                      step={2}
-                      value={params.minIslandPx}
-                      onChange={(e) =>
-                        setParams((p) => ({
-                          ...p,
-                          minIslandPx: parseInt(e.target.value, 10),
-                        }))
-                      }
-                      className="w-full accent-blue-600 cursor-pointer"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-slate-600">Path Simplification (RDP)</span>
-                      <span className="font-mono font-semibold text-slate-700">
-                        {params.cornerSimplify.toFixed(2)} px
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0.1}
-                      max={1.2}
-                      step={0.05}
-                      value={params.cornerSimplify}
-                      onChange={(e) =>
-                        setParams((p) => ({
-                          ...p,
-                          cornerSimplify: parseFloat(e.target.value),
-                        }))
-                      }
-                      className="w-full accent-blue-600 cursor-pointer"
-                    />
-                  </div>
-                </section>
-              </>
-            )}
-
-            {controlsTab === 'all' && <hr className="border-slate-200" />}
-
-            {(controlsTab === 'all' || controlsTab === 'colors_box') && (
-              <>
-                {/* Section 04: Bambu AMS 4-Colour Filament Slots */}
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold text-slate-800">
-                      04. Bambu AMS Filament Slots
-                    </h3>
-                    <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
-                      {([2, 3, 4] as const).map((cnt) => (
-                        <button
-                          key={cnt}
-                          type="button"
-                          onClick={() => setParams((p) => ({ ...p, numColors: cnt }))}
-                          className={`px-2 py-0.5 text-[11px] font-mono font-semibold rounded-md transition-colors cursor-pointer ${
-                            params.numColors === cnt
-                              ? 'bg-blue-600 text-white'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          {cnt}C
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs text-slate-500">
-                      Combine similar slots or snap to official Bambu PLA.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={handleSnapAllToBambuFilaments}
-                      className="px-2.5 py-1 rounded-lg bg-teal-50 hover:bg-teal-100 border border-teal-200 text-[11px] font-semibold text-teal-800 whitespace-nowrap transition-colors cursor-pointer shrink-0"
-                    >
-                      Match Bambu PLA
-                    </button>
-                  </div>
-
-                  {/* Quick Merge Similar Pair Bar */}
-                  {(closestMergeablePair ||
-                    slotConfigs.some((s) => s.mergedIntoSlot != null)) && (
-                    <div className="flex items-center justify-between gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
-                      {closestMergeablePair ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleMergeSlotInto(
-                              closestMergeablePair.source.slotIndex,
-                              closestMergeablePair.target.slotIndex
-                            )
-                          }
-                          className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-700 hover:text-blue-800 cursor-pointer min-w-0"
-                        >
-                          <span className="flex items-center -space-x-1 shrink-0">
-                            <span
-                              className="w-3 h-3 rounded-full border border-slate-400"
-                              style={{
-                                backgroundColor: closestMergeablePair.target.printHex,
-                              }}
-                            />
-                            <span
-                              className="w-3 h-3 rounded-full border border-slate-400"
-                              style={{
-                                backgroundColor: closestMergeablePair.source.printHex,
-                              }}
-                            />
-                          </span>
-                          <span className="truncate">
-                            Merge Closest: Slot {closestMergeablePair.target.slotIndex + 1} +
-                            Slot {closestMergeablePair.source.slotIndex + 1}
-                          </span>
-                        </button>
-                      ) : (
-                        <span className="text-[11px] text-slate-500">Slots merged</span>
-                      )}
-
-                      {slotConfigs.some((s) => s.mergedIntoSlot != null) && (
-                        <button
-                          type="button"
-                          onClick={handleUnmergeAllSlots}
-                          className="px-2 py-0.5 rounded bg-white hover:bg-slate-100 border border-slate-300 text-[10px] font-semibold text-slate-700 cursor-pointer shrink-0"
-                        >
-                          Unmerge All
-                        </button>
-                      )}
-                    </div>
-                  )}
-
-                  {/* 4 AMS Slot Rows */}
-                  <div className="space-y-2">
-                    {traceResult?.layers.map((layer) => {
-                      const slotCfg = slotConfigs[layer.slotIndex];
-                      const isLocked = Boolean(slotCfg?.lockedSourceHex);
-                      const isEyedropping = eyedropperTarget === layer.slotIndex;
-                      const isSwatchOpen = openColorPickerSlot === layer.slotIndex;
-                      const isMergedOut = layer.mergedIntoSlot != null;
-                      const mergedTargetLayer =
-                        isMergedOut && traceResult
-                          ? traceResult.layers.find((l) => l.slotIndex === layer.mergedIntoSlot)
-                          : null;
-                      const mergedFromList = layer.mergedFromSlots || [];
-                      const effectiveDisplayHex = mergedTargetLayer
-                        ? mergedTargetLayer.printHex
-                        : layer.printHex;
-                      const bambuMatch = findClosestBambuFilament(effectiveDisplayHex);
-                      const isExactBambuHex =
-                        bambuMatch.preset.hex.toUpperCase() ===
-                        effectiveDisplayHex.toUpperCase();
-
-                      return (
-                        <div
-                          key={layer.slotIndex}
-                          onMouseEnter={() => setHighlightedSlot(layer.slotIndex)}
-                          onMouseLeave={() => setHighlightedSlot(null)}
-                          className={`rounded-xl border p-2.5 transition-all ${
-                            !layer.enabled
-                              ? 'bg-red-50/40 border-red-200 opacity-75'
-                              : isMergedOut
-                              ? 'bg-slate-50 border-blue-200'
-                              : highlightedSlot === layer.slotIndex
-                              ? 'bg-blue-50/50 border-blue-400 shadow-2xs'
-                              : 'bg-white border-slate-200'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setOpenColorPickerSlot(
-                                    isSwatchOpen ? null : layer.slotIndex
-                                  )
-                                }
-                                className="w-6 h-6 rounded-lg border border-slate-300 shrink-0 shadow-2xs cursor-pointer relative overflow-hidden"
-                                style={{ backgroundColor: layer.printHex }}
-                                title="Change filament colour"
-                              >
-                                {!layer.enabled && (
-                                  <span className="inset-0 bg-slate-900/60 flex items-center justify-center w-full h-full">
-                                    <X className="w-3.5 h-3.5 text-red-200" />
-                                  </span>
-                                )}
-                              </button>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span
-                                    className={`text-xs font-bold whitespace-nowrap ${
-                                      layer.enabled
-                                        ? 'text-slate-800'
-                                        : 'text-slate-400 line-through'
-                                    }`}
-                                  >
-                                    {layer.slotIndex === 4
-                                      ? params.boxMode
-                                        ? 'Hollow Box'
-                                        : 'Stroke'
-                                      : `Slot ${layer.slotIndex + 1}`}
-                                  </span>
-                                  <span className="text-[11px] font-mono text-slate-500">
-                                    {layer.printHex}
-                                  </span>
-                                  {layer.isStrokeAndBase && (
-                                    <span className="px-1.5 py-0.2 rounded bg-teal-50 text-teal-800 border border-teal-200 text-[10px] font-semibold">
-                                      {params.boxMode
-                                        ? 'Box Walls & Floor'
-                                        : 'Stroke & Base'}
-                                    </span>
-                                  )}
-                                  {mergedFromList.length > 0 && (
-                                    <span className="px-1.5 py-0.2 rounded bg-blue-50 border border-blue-200 text-[10px] font-semibold text-blue-700">
-                                      + Slot {mergedFromList.map((idx) => idx + 1).join(', ')}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[11px] font-mono text-slate-500 truncate">
-                                  {!layer.enabled ? (
-                                    <span className="text-red-600">Removed from print</span>
-                                  ) : isMergedOut && mergedTargetLayer ? (
-                                    <span className="text-blue-700">
-                                      Merged into Slot {mergedTargetLayer.slotIndex + 1}
-                                    </span>
-                                  ) : (
-                                    <>
-                                      {layer.coveragePercent.toFixed(1)}% ·{' '}
-                                      {layer.polygons.length}{' '}
-                                      {layer.polygons.length === 1 ? 'region' : 'regions'}
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-1 shrink-0">
-                              {isMergedOut ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleMergeSlotInto(layer.slotIndex, null)}
-                                  className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 cursor-pointer"
-                                >
-                                  <RotateCcw className="w-3 h-3" />
-                                  <span>Unmerge</span>
-                                </button>
-                              ) : (
-                                <>
-                                  {layer.slotIndex !== 4 && (
-                                    <>
-                                      <button
-                                        type="button"
-                                        onClick={() => activateEyedropper(layer.slotIndex)}
-                                        className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-                                          isEyedropping
-                                            ? 'bg-blue-100 text-blue-700'
-                                            : 'text-slate-400 hover:text-slate-700 hover:bg-slate-100'
-                                        }`}
-                                        title="Sample colour from image"
-                                      >
-                                        <Pipette className="w-3.5 h-3.5" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          setSlotConfigs((prev) =>
-                                            prev.map((s, idx) =>
-                                              idx === layer.slotIndex
-                                                ? {
-                                                    ...s,
-                                                    lockedSourceHex: s.lockedSourceHex
-                                                      ? null
-                                                      : layer.detectedHex,
-                                                    printHex: layer.printHex,
-                                                  }
-                                                : s
-                                            )
-                                          )
-                                        }
-                                        className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-                                          isLocked
-                                            ? 'text-amber-600 bg-amber-50'
-                                            : 'text-slate-400 hover:text-slate-700 hover:bg-slate-100'
-                                        }`}
-                                        title={isLocked ? 'Unlock colour' : 'Lock colour'}
-                                      >
-                                        {isLocked ? (
-                                          <Lock className="w-3.5 h-3.5" />
-                                        ) : (
-                                          <Unlock className="w-3.5 h-3.5" />
-                                        )}
-                                      </button>
-                                    </>
-                                  )}
-                                </>
-                              )}
-
-                              <button
-                                type="button"
-                                onClick={() => handleToggleSlotEnabled(layer.slotIndex)}
-                                className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
-                                  layer.enabled
-                                    ? 'bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-600 border-slate-200'
-                                    : 'bg-red-50 text-red-700 border-red-200'
-                                }`}
-                              >
-                                {layer.enabled ? (
-                                  <>
-                                    <EyeOff className="w-3 h-3" />
-                                    <span>Remove</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Eye className="w-3 h-3" />
-                                    <span>Restore</span>
-                                  </>
-                                )}
-                              </button>
-                            </div>
-                          </div>
-
-                          {/* Per-Slot Merge & Bambu Match */}
-                          {layer.enabled && !isMergedOut && (
-                            <div className="mt-2 pt-1.5 border-t border-slate-100 space-y-1.5">
-                              {layer.slotIndex !== 4 &&
-                                traceResult.layers.filter(
-                                  (other) =>
-                                    other.slotIndex !== layer.slotIndex &&
-                                    other.slotIndex !== 4 &&
-                                    other.enabled &&
-                                    other.mergedIntoSlot == null
-                                ).length > 0 && (
-                                  <div className="flex items-center justify-between gap-1.5">
-                                    <span className="text-[10px] text-slate-400">
-                                      Merge into:
-                                    </span>
-                                    <div className="flex items-center gap-1 flex-wrap justify-end">
-                                      {traceResult.layers
-                                        .filter(
-                                          (other) =>
-                                            other.slotIndex !== layer.slotIndex &&
-                                            other.slotIndex !== 4 &&
-                                            other.enabled &&
-                                            other.mergedIntoSlot == null
-                                        )
-                                        .map((other) => (
-                                          <button
-                                            key={other.slotIndex}
-                                            type="button"
-                                            onClick={() =>
-                                              handleMergeSlotInto(
-                                                layer.slotIndex,
-                                                other.slotIndex
-                                              )
-                                            }
-                                            className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-50 hover:bg-blue-50 border border-slate-200 hover:border-blue-300 text-[10px] font-mono text-slate-600 hover:text-blue-700 cursor-pointer"
-                                          >
-                                            <span
-                                              className="w-2 h-2 rounded-full border border-slate-400"
-                                              style={{ backgroundColor: other.printHex }}
-                                            />
-                                            <span>Slot {other.slotIndex + 1}</span>
-                                          </button>
-                                        ))}
-                                    </div>
-                                  </div>
-                                )}
-
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  <span
-                                    className="w-2.5 h-2.5 rounded-full border border-slate-300 shrink-0"
-                                    style={{ backgroundColor: bambuMatch.preset.hex }}
-                                  />
-                                  <span className="text-[11px] text-slate-500 truncate">
-                                    Bambu {bambuMatch.preset.series}:{' '}
-                                    <span className="text-slate-800 font-semibold">
-                                      {bambuMatch.preset.name}
-                                    </span>
-                                  </span>
-                                </div>
-                                {!isExactBambuHex ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (layer.isStrokeAndBase && layer.slotIndex === 4) {
-                                        setParams((p) => ({
-                                          ...p,
-                                          strokeColorHex: bambuMatch.preset.hex,
-                                        }));
-                                      } else {
-                                        setSlotConfigs((prev) =>
-                                          prev.map((s, idx) =>
-                                            idx === layer.slotIndex
-                                              ? {
-                                                  ...s,
-                                                  printHex: bambuMatch.preset.hex,
-                                                  lockedSourceHex:
-                                                    s.lockedSourceHex || layer.detectedHex,
-                                                }
-                                              : s
-                                          )
-                                        );
-                                      }
-                                    }}
-                                    className="text-[10px] font-mono font-semibold text-teal-700 bg-teal-50 hover:bg-teal-100 px-1.5 py-0.5 rounded border border-teal-200 cursor-pointer shrink-0"
-                                  >
-                                    Snap {bambuMatch.preset.hex}
-                                  </button>
-                                ) : (
-                                  <span className="text-[10px] font-mono text-teal-700 font-semibold shrink-0">
-                                    Exact Match
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Expandable Swatch Picker */}
-                          {isSwatchOpen && (
-                            <div className="mt-2.5 pt-2.5 border-t border-slate-200 space-y-2">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-medium text-slate-600">
-                                  Official Bambu PLA Basic &amp; Matte
-                                </span>
-                                <input
-                                  type="color"
-                                  value={layer.printHex}
-                                  onChange={(e) => {
-                                    const newHex = e.target.value.toUpperCase();
-                                    if (layer.isStrokeAndBase && layer.slotIndex === 4) {
-                                      setParams((p) => ({ ...p, strokeColorHex: newHex }));
-                                    } else {
-                                      setSlotConfigs((prev) =>
-                                        prev.map((s, idx) =>
-                                          idx === layer.slotIndex
-                                            ? {
-                                                ...s,
-                                                printHex: newHex,
-                                                lockedSourceHex:
-                                                  s.lockedSourceHex || layer.detectedHex,
-                                              }
-                                            : s
-                                        )
-                                      );
-                                    }
-                                  }}
-                                  className="w-6 h-5 rounded cursor-pointer bg-transparent border-0"
-                                />
-                              </div>
-                              <div className="grid grid-cols-9 gap-1 max-h-28 overflow-y-auto pr-1">
-                                {OFFICIAL_BAMBU_FILAMENTS.map((sw) => (
-                                  <button
-                                    key={`${sw.code}_${sw.hex}`}
-                                    type="button"
-                                    onClick={() => {
-                                      if (layer.isStrokeAndBase && layer.slotIndex === 4) {
-                                        setParams((p) => ({ ...p, strokeColorHex: sw.hex }));
-                                      } else {
-                                        setSlotConfigs((prev) =>
-                                          prev.map((s, idx) =>
-                                            idx === layer.slotIndex
-                                              ? {
-                                                  ...s,
-                                                  printHex: sw.hex,
-                                                  lockedSourceHex:
-                                                    s.lockedSourceHex || layer.detectedHex,
-                                                }
-                                              : s
-                                          )
-                                        );
-                                      }
-                                      setOpenColorPickerSlot(null);
-                                    }}
-                                    className="w-5 h-5 rounded border border-slate-300 hover:scale-110 transition-transform cursor-pointer"
-                                    style={{ backgroundColor: sw.hex }}
-                                    title={`${sw.series} — ${sw.name} (${sw.hex})`}
-                                  />
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                <hr className="border-slate-200" />
-
-                {/* Section 05: Stroke Outline & Hollow Box Mode */}
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="text-xs font-bold text-slate-800">
-                      05. Stroke Outline &amp; Box Mode
-                    </h3>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => {
-                            const nextStroke = !p.strokeEnabled;
-                            return {
-                              ...p,
-                              strokeEnabled: nextStroke,
-                              boxMode: nextStroke ? p.boxMode : false,
-                            };
-                          })
-                        }
-                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                          params.strokeEnabled && !params.boxMode
-                            ? 'bg-blue-50 text-blue-700 border-blue-300 ring-2 ring-blue-500/20'
-                            : 'bg-white text-slate-600 hover:bg-slate-50 border-slate-300'
-                        }`}
-                      >
-                        {params.strokeEnabled && !params.boxMode ? 'Stroke ON' : 'Add Stroke'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => {
-                            const nextBox = !p.boxMode;
-                            return {
-                              ...p,
-                              boxMode: nextBox,
-                              strokeEnabled: nextBox ? true : p.strokeEnabled,
-                              strokeFillInnerGaps: nextBox ? true : p.strokeFillInnerGaps,
-                            };
-                          })
-                        }
-                        className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                          params.boxMode
-                            ? 'bg-teal-700 text-white border-teal-800 shadow-xs'
-                            : 'bg-teal-50 hover:bg-teal-100 text-teal-800 border-teal-200'
-                        }`}
-                      >
-                        <PackageOpen className="w-3.5 h-3.5" />
-                        <span>{params.boxMode ? 'Box Mode ON' : 'Box Mode'}</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    {params.boxMode
-                      ? 'Box Mode creates a hollow 3D container (Contour, Square, Circle, or Rectangle) while your multi-colour traced logo becomes the fitted lid.'
-                      : 'Add an outline or geometric frame around your artwork — or enable Box Mode for a hollow box (Contour, Square, Circle, or Rectangle) with a traced lid.'}
-                  </p>
-
-                  {!params.strokeEnabled && !params.boxMode && (
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => ({
-                            ...p,
-                            boxMode: true,
-                            strokeEnabled: true,
-                            strokeShape: 'contour',
-                            strokeFillInnerGaps: true,
-                          }))
-                        }
-                        className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 text-[11px] font-semibold text-slate-700 hover:text-teal-800 transition-all cursor-pointer"
-                      >
-                        Contour Box
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => ({
-                            ...p,
-                            boxMode: true,
-                            strokeEnabled: true,
-                            strokeShape: 'square',
-                            strokeFillInnerGaps: true,
-                          }))
-                        }
-                        className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 text-[11px] font-semibold text-slate-700 hover:text-teal-800 transition-all cursor-pointer"
-                      >
-                        Square Box
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => ({
-                            ...p,
-                            boxMode: true,
-                            strokeEnabled: true,
-                            strokeShape: 'circle',
-                            strokeFillInnerGaps: true,
-                          }))
-                        }
-                        className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 text-[11px] font-semibold text-slate-700 hover:text-teal-800 transition-all cursor-pointer"
-                      >
-                        Circle Box
-                      </button>
-                    </div>
-                  )}
-
-                  {(params.strokeEnabled || params.boxMode) && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
-                      <div className="grid grid-cols-2 gap-1 bg-slate-200/70 p-1 rounded-xl">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setParams((p) => ({
-                              ...p,
-                              strokeEnabled: true,
-                              boxMode: false,
-                            }))
-                          }
-                          className={`px-2 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                            !params.boxMode
-                              ? 'bg-white text-blue-700 shadow-2xs'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          Flat Badge + Frame
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setParams((p) => ({
-                              ...p,
-                              strokeEnabled: true,
-                              boxMode: true,
-                              strokeFillInnerGaps: true,
-                            }))
-                          }
-                          className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                            params.boxMode
-                              ? 'bg-white text-teal-800 shadow-2xs'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          <PackageOpen className="w-3.5 h-3.5" />
-                          <span>Hollow Box + Lid</span>
-                        </button>
-                      </div>
-
-                      {/* Box / Frame Shape Profile (Contour / Square / Circle / Rectangle) */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-slate-700 font-semibold">
-                            {params.boxMode
-                              ? 'Box & Lid Outer Shape'
-                              : 'Outer Frame / Base Shape'}
-                          </span>
-                          <span className="text-[10px] font-mono text-teal-700 bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded">
-                            {(params.strokeShape || 'contour') === 'contour'
-                              ? 'Follows Logo'
-                              : 'For Odd-Shaped Logos'}
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-4 gap-1 bg-white p-1 rounded-xl border border-slate-200">
-                          {(
-                            [
-                              ['contour', 'Contour'],
-                              ['square', 'Square'],
-                              ['circle', 'Circle'],
-                              ['rectangle', 'Rect'],
-                            ] as [BoxOutlineShape, string][]
-                          ).map(([shapeOpt, label]) => {
-                            const active = (params.strokeShape || 'contour') === shapeOpt;
-                            return (
-                              <button
-                                key={shapeOpt}
-                                type="button"
-                                onClick={() =>
-                                  setParams((p) => ({
-                                    ...p,
-                                    strokeShape: shapeOpt,
-                                    strokeFillInnerGaps:
-                                      shapeOpt !== 'contour' ? true : p.strokeFillInnerGaps,
-                                  }))
-                                }
-                                className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer truncate ${
-                                  active
-                                    ? 'bg-blue-50 text-blue-700 border border-blue-200 shadow-2xs'
-                                    : 'text-slate-600 hover:text-slate-900'
-                                }`}
-                              >
-                                {label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        {(params.strokeShape || 'contour') !== 'contour' && (
-                          <p className="text-[11px] text-slate-500 leading-snug">
-                            Encloses odd-shaped or multi-piece logos inside a clean{' '}
-                            <span className="font-semibold text-slate-700">
-                              {params.strokeShape === 'square'
-                                ? '1:1 Square'
-                                : params.strokeShape === 'circle'
-                                ? 'Circular'
-                                : 'Fitted Rectangular'}
-                            </span>{' '}
-                            {params.boxMode
-                              ? 'hollow box and flush multi-colour inlay lid.'
-                              : 'plaque frame.'}
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Geometric Padding & Corner Fillet Sliders when Square / Circle / Rectangle is active */}
-                      {(params.strokeShape || 'contour') !== 'contour' && (
-                        <div
-                          className={`grid ${
-                            params.strokeShape === 'circle' ? 'grid-cols-1' : 'grid-cols-2'
-                          } gap-2.5 bg-white border border-slate-200/90 rounded-xl p-2.5`}
-                        >
-                          <div>
-                            <div className="flex items-center justify-between text-[11px] mb-1">
-                              <span className="text-slate-600">Logo Margin Padding</span>
-                              <span className="font-mono font-semibold text-teal-700">
-                                {(params.shapePaddingMm ?? 3.5).toFixed(1)} mm
-                              </span>
-                            </div>
-                            <input
-                              type="range"
-                              min={1.0}
-                              max={14.0}
-                              step={0.5}
-                              value={params.shapePaddingMm ?? 3.5}
-                              onChange={(e) =>
-                                setParams((p) => ({
-                                  ...p,
-                                  shapePaddingMm: parseFloat(e.target.value),
-                                }))
-                              }
-                              className="w-full accent-blue-600 cursor-pointer"
-                            />
-                          </div>
-
-                          {params.strokeShape !== 'circle' && (
-                            <div>
-                              <div className="flex items-center justify-between text-[11px] mb-1">
-                                <span className="text-slate-600">Corner Fillet Radius</span>
-                                <span className="font-mono font-semibold text-teal-700">
-                                  {(params.shapeCornerRadiusMm ?? 4.0).toFixed(1)} mm
-                                </span>
-                              </div>
-                              <input
-                                type="range"
-                                min={0.0}
-                                max={20.0}
-                                step={0.5}
-                                value={params.shapeCornerRadiusMm ?? 4.0}
-                                onChange={(e) =>
-                                  setParams((p) => ({
-                                    ...p,
-                                    shapeCornerRadiusMm: parseFloat(e.target.value),
-                                  }))
-                                }
-                                className="w-full accent-blue-600 cursor-pointer"
-                              />
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Stroke / Box Colour Swatches */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-slate-700 font-semibold">
-                            {params.boxMode
-                              ? 'Hollow Box & Rim Colour'
-                              : 'Stroke & Base Colour'}
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[11px] font-mono text-slate-600">
-                              {params.strokeColorHex}
-                            </span>
-                            <input
-                              type="color"
-                              value={params.strokeColorHex}
-                              onChange={(e) =>
-                                setParams((p) => ({
-                                  ...p,
-                                  strokeColorHex: e.target.value.toUpperCase(),
-                                }))
-                              }
-                              className="w-6 h-6 rounded cursor-pointer bg-transparent border-0"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-8 gap-1.5">
-                          {BAMBU_FILAMENT_SWATCHES.map((sw) => {
-                            const active = params.strokeColorHex === sw.hex;
-                            return (
-                              <button
-                                key={sw.hex}
-                                type="button"
-                                onClick={() =>
-                                  setParams((p) => ({ ...p, strokeColorHex: sw.hex }))
-                                }
-                                className={`w-6 h-6 rounded-md border transition-transform cursor-pointer ${
-                                  active
-                                    ? 'border-blue-600 ring-2 ring-blue-500/30 scale-105'
-                                    : 'border-slate-300 hover:scale-110'
-                                }`}
-                                style={{ backgroundColor: sw.hex }}
-                                title={sw.name}
-                              />
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Wall / Stroke Width */}
-                      <div>
-                        <div className="flex items-center justify-between text-xs mb-1">
-                          <span className="text-slate-600">
-                            {params.boxMode
-                              ? 'Box Outer Wall Thickness (Stroke)'
-                              : 'Stroke Outline Width'}
-                          </span>
-                          <span className="font-mono font-semibold text-teal-700">
-                            {params.strokeWidthMm.toFixed(1)} mm
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0.8}
-                          max={10.0}
-                          step={0.2}
-                          value={params.strokeWidthMm}
-                          onChange={(e) =>
-                            setParams((p) => ({
-                              ...p,
-                              strokeWidthMm: parseFloat(e.target.value),
-                            }))
-                          }
-                          className="w-full accent-blue-600 cursor-pointer"
-                        />
-                      </div>
-
-                      {params.boxMode ? (
-                        <>
-                          <div>
-                            <div className="flex items-center justify-between text-xs mb-1">
-                              <span className="text-slate-600">
-                                Hollow Box Total Height (Z)
-                              </span>
-                              <span className="font-mono font-semibold text-teal-700">
-                                {(params.boxHeightMm ?? 28).toFixed(0)} mm
-                              </span>
-                            </div>
-                            <input
-                              type="range"
-                              min={10}
-                              max={80}
-                              step={1}
-                              value={params.boxHeightMm ?? 28}
-                              onChange={(e) =>
-                                setParams((p) => ({
-                                  ...p,
-                                  boxHeightMm: parseFloat(e.target.value),
-                                }))
-                              }
-                              className="w-full accent-blue-600 cursor-pointer"
-                            />
-                          </div>
-
-                          {/* Lid Fit Style */}
-                          <div className="space-y-1">
-                            <span className="text-xs font-medium text-slate-600 block">
-                              Traced Image Lid Fit Style
-                            </span>
-                            <div className="grid grid-cols-3 gap-1 bg-white p-1 rounded-xl border border-slate-200">
-                              {(
-                                [
-                                  ['flush_recessed', 'Flush + Ledge'],
-                                  ['raised_rim_recessed', 'Recessed Rim'],
-                                  ['cap_with_plug', 'Cap + Plug'],
-                                ] as [BoxLidStyle, string][]
-                              ).map(([style, label]) => (
-                                <button
-                                  key={style}
-                                  type="button"
-                                  onClick={() =>
-                                    setParams((p) => ({ ...p, boxLidStyle: style }))
-                                  }
-                                  className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer truncate ${
-                                    (params.boxLidStyle || 'cap_with_plug') === style
-                                      ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                      : 'text-slate-600 hover:text-slate-900'
-                                  }`}
-                                >
-                                  {label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2.5">
-                            <div>
-                              <div className="flex items-center justify-between text-[11px] mb-1">
-                                <span className="text-slate-600">
-                                  {(params.boxLidStyle || 'cap_with_plug') === 'cap_with_plug'
-                                    ? 'Plug Lip Width'
-                                    : 'Inner Ledge Shelf'}
-                                </span>
-                                <span className="font-mono font-semibold text-teal-700">
-                                  {(params.boxLedgeWidthMm ?? 1.4).toFixed(1)} mm
-                                </span>
-                              </div>
-                              <input
-                                type="range"
-                                min={0.8}
-                                max={3.2}
-                                step={0.2}
-                                value={params.boxLedgeWidthMm ?? 1.4}
-                                onChange={(e) =>
-                                  setParams((p) => ({
-                                    ...p,
-                                    boxLedgeWidthMm: parseFloat(e.target.value),
-                                  }))
-                                }
-                                className="w-full accent-blue-600 cursor-pointer"
-                              />
-                            </div>
-
-                            <div>
-                              <div className="flex items-center justify-between text-[11px] mb-1">
-                                <span className="text-slate-600">Lid XY Clearance</span>
-                                <span className="font-mono font-semibold text-teal-700">
-                                  {(params.boxLidToleranceMm ?? 0.2).toFixed(2)} mm
-                                </span>
-                              </div>
-                              <input
-                                type="range"
-                                min={0.0}
-                                max={0.4}
-                                step={0.05}
-                                value={params.boxLidToleranceMm ?? 0.2}
-                                onChange={(e) =>
-                                  setParams((p) => ({
-                                    ...p,
-                                    boxLidToleranceMm: parseFloat(e.target.value),
-                                  }))
-                                }
-                                className="w-full accent-blue-600 cursor-pointer"
-                              />
-                            </div>
-                          </div>
-
-                          {/* Parts to Export */}
-                          <div className="space-y-1 pt-1 border-t border-slate-200">
-                            <span className="text-[11px] font-medium text-slate-600 block">
-                              Parts to Include on Plate &amp; Export
-                            </span>
-                            <div className="grid grid-cols-3 gap-1 bg-white p-1 rounded-xl border border-slate-200">
-                              {(
-                                [
-                                  ['both', 'Box + Lid'],
-                                  ['box_only', 'Box Only'],
-                                  ['lid_only', 'Lid Only'],
-                                ] as [BoxExportParts, string][]
-                              ).map(([partOpt, label]) => (
-                                <button
-                                  key={partOpt}
-                                  type="button"
-                                  onClick={() =>
-                                    setParams((p) => ({ ...p, boxExportParts: partOpt }))
-                                  }
-                                  className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer truncate ${
-                                    (params.boxExportParts || 'both') === partOpt
-                                      ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                      : 'text-slate-600 hover:text-slate-900'
-                                  }`}
-                                >
-                                  {label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <div className="space-y-1">
-                            <span className="text-xs font-medium text-slate-600 block">
-                              Stroke 3D Surface Profile
-                            </span>
-                            <div className="grid grid-cols-3 gap-1 bg-white p-1 rounded-xl border border-slate-200">
-                              {(
-                                [
-                                  ['flush_top_and_base', 'Flush + Base'],
-                                  ['raised_rim_and_base', 'Raised Rim'],
-                                  ['stepped_base_only', 'Base Offset'],
-                                ] as [StrokeProfileStyle, string][]
-                              ).map(([style, label]) => (
-                                <button
-                                  key={style}
-                                  type="button"
-                                  onClick={() =>
-                                    setParams((p) => ({ ...p, strokeProfileStyle: style }))
-                                  }
-                                  className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer truncate ${
-                                    params.strokeProfileStyle === style
-                                      ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                      : 'text-slate-600 hover:text-slate-900'
-                                  }`}
-                                >
-                                  {label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </section>
-              </>
-            )}
-
-            {controlsTab === 'all' && <hr className="border-slate-200" />}
-
-            {(controlsTab === 'all' || controlsTab === 'extrusion') && (
-              /* Section 06: 3D Extrusion Profile & Dimensions */
-              <section className="space-y-3.5">
-                <h3 className="text-xs font-bold text-slate-800">
-                  06. 3D Extrusion &amp; Slicer Geometry
-                </h3>
-
-                <div className="space-y-1.5">
-                  <span className="text-xs font-medium text-slate-600 block">
-                    Multi-Colour Extrusion Topology
-                  </span>
-                  <div className="grid grid-cols-1 gap-1.5">
-                    {(
-                      [
-                        {
-                          mode: 'backed_inlay' as ExtrusionMode,
-                          title: 'Backed Silhouette + Surface Inlay',
-                          desc: 'Base slot forms solid outer silhouette core; active colours inlay on top.',
-                        },
-                        {
-                          mode: 'full_flush' as ExtrusionMode,
-                          title: 'Full-Depth Flush Extrusion',
-                          desc: 'Every active colour extrudes full Z-height (0 to top).',
-                        },
-                        {
-                          mode: 'stepped_relief' as ExtrusionMode,
-                          title: 'Inkscape Stacked Relief (2.5D)',
-                          desc: 'Cumulative stacked vector layers with stepped Z-heights.',
-                        },
-                      ] as const
-                    ).map((item) => {
-                      const active = params.extrusionMode === item.mode;
-                      return (
-                        <button
-                          key={item.mode}
-                          type="button"
-                          onClick={() =>
-                            setParams((p) => ({ ...p, extrusionMode: item.mode }))
-                          }
-                          className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                            active
-                              ? 'bg-blue-50 text-blue-700 border-blue-300 ring-2 ring-blue-500/20'
-                              : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-800'
-                          }`}
-                        >
-                          <div className="text-xs font-bold">{item.title}</div>
-                          <div className="text-[11px] text-slate-500 mt-0.5 leading-snug">
-                            {item.desc}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Physical Print Width (mm) */}
-                <div>
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="text-slate-600">Print Width (X)</span>
-                    <span className="font-mono font-semibold text-teal-700">
-                      {params.targetWidthMm.toFixed(0)} mm
-                      {extrudedModel
-                        ? ` × ${extrudedModel.dimensionsMm.depth.toFixed(0)} mm`
-                        : ''}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={25}
-                    max={230}
-                    step={5}
-                    value={params.targetWidthMm}
-                    onChange={(e) =>
-                      setParams((p) => ({
-                        ...p,
-                        targetWidthMm: parseFloat(e.target.value),
-                      }))
-                    }
-                    className="w-full accent-blue-600 cursor-pointer"
-                  />
-                </div>
-
-                {/* Base Thickness (mm) */}
-                <div>
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="text-slate-600">
-                      {params.extrusionMode === 'full_flush'
-                        ? 'Total Extrusion Thickness (Z)'
-                        : 'Base Silhouette Thickness'}
-                    </span>
-                    <span className="font-mono font-semibold text-slate-800">
-                      {params.baseThicknessMm.toFixed(1)} mm
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0.6}
-                    max={8.0}
-                    step={0.2}
-                    value={params.baseThicknessMm}
-                    onChange={(e) =>
-                      setParams((p) => ({
-                        ...p,
-                        baseThicknessMm: parseFloat(e.target.value),
-                      }))
-                    }
-                    className="w-full accent-blue-600 cursor-pointer"
-                  />
-                </div>
-
-                {/* Inlay / Step Layer Thickness (mm) */}
-                {params.extrusionMode !== 'full_flush' && (
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-slate-600 font-medium">
-                        {params.extrusionMode === 'backed_inlay'
-                          ? 'Non-Base Colour Inlay Depth'
-                          : 'Z-Step Height per Colour'}
-                      </span>
-                      <span className="font-mono font-semibold text-teal-700 bg-teal-50 px-2 py-0.5 rounded border border-teal-200">
-                        {params.inlayThicknessMm.toFixed(2)} mm (
-                        {Math.round(params.inlayThicknessMm / 0.2)}{' '}
-                        {Math.round(params.inlayThicknessMm / 0.2) === 1
-                          ? 'layer'
-                          : 'layers'}{' '}
-                        @ 0.20mm)
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setParams((p) => ({ ...p, inlayThicknessMm: 0.4 }))}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all cursor-pointer ${
-                          Math.abs(params.inlayThicknessMm - 0.4) < 0.05
-                            ? 'bg-blue-600 text-white border-blue-700 shadow-2xs'
-                            : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
-                        }`}
-                      >
-                        0.4mm (2 Layers · Bambu Standard)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setParams((p) => ({ ...p, inlayThicknessMm: 0.6 }))}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all cursor-pointer ${
-                          Math.abs(params.inlayThicknessMm - 0.6) < 0.05
-                            ? 'bg-blue-600 text-white border-blue-700 shadow-2xs'
-                            : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
-                        }`}
-                      >
-                        0.6mm (3 Layers)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setParams((p) => ({ ...p, inlayThicknessMm: 0.8 }))}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all cursor-pointer ${
-                          Math.abs(params.inlayThicknessMm - 0.8) < 0.05
-                            ? 'bg-blue-600 text-white border-blue-700 shadow-2xs'
-                            : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
-                        }`}
-                      >
-                        0.8mm (4 Layers)
-                      </button>
-                    </div>
-
-                    <input
-                      type="range"
-                      min={0.2}
-                      max={3.0}
-                      step={0.2}
-                      value={params.inlayThicknessMm}
-                      onChange={(e) =>
-                        setParams((p) => ({
-                          ...p,
-                          inlayThicknessMm: parseFloat(e.target.value),
-                        }))
-                      }
-                      className="w-full accent-blue-600 cursor-pointer"
-                    />
-
-                    <p className="text-[11px] text-slate-500 leading-relaxed">
-                      At <span className="font-semibold text-slate-700">0.40mm</span>, non-base colours
-                      export at exactly 2 layers on the build plate. The remaining{' '}
-                      <span className="font-semibold text-slate-700">
-                        {(params.baseThicknessMm - params.inlayThicknessMm).toFixed(1)}mm
-                      </span>{' '}
-                      prints 100% in the base filament with zero filament changes.
-                    </p>
-
-                    {/* Print Bed Orientation Toggle */}
-                    <div className="pt-2 border-t border-slate-200/80 space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-medium text-slate-700 block">
-                          Export Print Bed Alignment
-                        </span>
-                        <span className="text-[10px] text-teal-600 font-semibold bg-teal-50 px-1.5 py-0.5 rounded border border-teal-200">
-                          Preview: Always Facing Up
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setFlipFaceDown(true);
-                            setParams((p) => ({ ...p, flipFaceDown: true }));
-                          }}
-                          className={`p-2 rounded-xl border text-left transition-all cursor-pointer ${
-                            flipFaceDown
-                              ? 'bg-teal-50 border-teal-300 ring-2 ring-teal-500/20 text-teal-900 shadow-2xs'
-                              : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'
-                          }`}
-                        >
-                          <div className="text-[11px] font-bold flex items-center justify-between">
-                            <span>Face-Down (PEI Bed)</span>
-                            {flipFaceDown && <span className="text-[10px] text-teal-600 font-bold">✓ Active</span>}
-                          </div>
-                          <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">
-                            Preview faces UP; exports flipped on build plate (strictly 2 layers @ 0.4mm).
-                          </div>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setFlipFaceDown(false);
-                            setParams((p) => ({ ...p, flipFaceDown: false }));
-                          }}
-                          className={`p-2 rounded-xl border text-left transition-all cursor-pointer ${
-                            !flipFaceDown
-                              ? 'bg-blue-50 border-blue-300 ring-2 ring-blue-500/20 text-blue-900 shadow-2xs'
-                              : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'
-                          }`}
-                        >
-                          <div className="text-[11px] font-bold flex items-center justify-between">
-                            <span>Face-Up (Embossed)</span>
-                            {!flipFaceDown && <span className="text-[10px] text-blue-600 font-bold">✓ Active</span>}
-                          </div>
-                          <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">
-                            Both preview and export face up; inlays sit on top surface of base plate.
-                          </div>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </section>
-            )}
+            {/* 06. Vector Smoothing Engine (Collapsible) */}
+            <VectorTraceSection
+              params={params}
+              setParams={setParams}
+              isExpanded={isVectorTraceExpanded}
+              onToggleExpand={() => setIsVectorTraceExpanded((v) => !v)}
+            />
           </div>
-        </aside>
+            </aside>
 
         {/* =====================================================================
             RIGHT COLUMN (lg:col-span-7): Live 2D/3D Stage + Submission & Export Card
@@ -2824,6 +1174,15 @@ export default function App() {
                   boxLidLiftMm={params.boxLidLiftMm ?? 16}
                   onChangeBoxLidLiftMm={(liftMm) =>
                     setParams((p) => ({ ...p, boxLidLiftMm: liftMm }))
+                  }
+                  boxDividersEnabled={params.boxDividersEnabled ?? false}
+                  boxDividerCols={params.boxDividerCols ?? 2}
+                  boxDividerRows={params.boxDividerRows ?? 2}
+                  onToggleBoxDividers={() =>
+                    setParams((p) => ({
+                      ...p,
+                      boxDividersEnabled: !p.boxDividersEnabled,
+                    }))
                   }
                 />
               ) : (
@@ -2917,49 +1276,14 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Bambu Studio Colour Loader Bar */}
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-semibold text-slate-700">
-                    Bambu .3MF Colour Format:
-                  </span>
-                  <div className="flex items-center bg-white p-0.5 rounded-lg border border-slate-200">
-                    <button
-                      type="button"
-                      onClick={() => setBambuColorFormat('standard_colorgroup')}
-                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
-                        bambuColorFormat === 'standard_colorgroup'
-                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      Auto-Parse Colours
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setBambuColorFormat('bambu_project')}
-                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
-                        bambuColorFormat === 'bambu_project'
-                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      Full Project Config
-                    </button>
-                  </div>
-                </div>
 
-                <button
-                  type="button"
-                  onClick={() => setSnapToOfficialBambuHex((v) => !v)}
-                  className={`px-2.5 py-1 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
-                    snapToOfficialBambuHex
-                      ? 'bg-teal-50 border-teal-200 text-teal-800'
-                      : 'bg-white border-slate-200 text-slate-600'
-                  }`}
-                >
-                  Snap to Bambu Hex: {snapToOfficialBambuHex ? 'ON' : 'EXACT HEX'}
-                </button>
+
+              {/* AMS 1..4 Mapping Guarantee Banner */}
+              <div className="flex items-center gap-2 text-[11px] text-teal-900 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-xl">
+                <Check className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                <span>
+                  <strong>Bambu Studio Ready:</strong> Automatically mapped strictly to the first 4 colors (Slots 1–4). Just export, import into Bambu Studio, and print immediately without adding extra filaments or recoloring.
+                </span>
               </div>
 
               {/* Primary Action Buttons: Send to Maker Space + Bambu .3MF + Binary STLs + .SVG */}

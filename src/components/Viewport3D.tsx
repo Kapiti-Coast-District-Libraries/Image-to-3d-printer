@@ -13,6 +13,7 @@ import {
   Undo2,
   X,
   PackageOpen,
+  LayoutGrid,
 } from 'lucide-react';
 
 interface Viewport3DProps {
@@ -31,6 +32,10 @@ interface Viewport3DProps {
   onChangeBoxPlateLayout?: (layout: BoxPlateLayout) => void;
   boxLidLiftMm?: number;
   onChangeBoxLidLiftMm?: (liftMm: number) => void;
+  boxDividersEnabled?: boolean;
+  boxDividerCols?: number;
+  boxDividerRows?: number;
+  onToggleBoxDividers?: () => void;
 }
 
 export const Viewport3D: React.FC<Viewport3DProps> = ({
@@ -49,6 +54,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   onChangeBoxPlateLayout,
   boxLidLiftMm = 16,
   onChangeBoxLidLiftMm,
+  boxDividersEnabled = false,
+  boxDividerCols = 2,
+  boxDividerRows = 2,
+  onToggleBoxDividers,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -259,29 +268,17 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           ? explodeAmount * (10 + idx * 3.5)
           : explodeAmount * idx * 4.5;
 
-      // In the 3D preview stage, plaque sign parts ALWAYS stay facing UP so the user
-      // can inspect their artwork, colours, and text right side up on the plate.
-      // (On export, parts are automatically flipped face-down onto the PEI bed when flipFaceDown is active).
-      const shouldFlipPartInPreview =
-        flipFaceDown &&
-        part.partGroup === 'lid' &&
-        !part.isPreFlippedFaceDown;
+      // In the 3D preview stage, all parts (including the box and lid) ALWAYS stay facing UP
+      // so the user can inspect their artwork, colours, and text clearly on the plate and box.
+      // (On export to .3MF / STL, parts are automatically flipped face-down onto the PEI bed when flipFaceDown is active).
       const pivotX = part.offsetX || 0;
-      const zSum =
-        part.partGroup === 'lid'
-          ? (part.lidZMin ?? 0) + (part.lidZMax ?? maxZ)
-          : maxZ;
 
       mesh.position.set(0, 0, zExplodeOffset);
-
-      if (shouldFlipPartInPreview) {
-        mesh.scale.set(-1, 1, -1);
-        mesh.position.set(2 * pivotX, 0, zSum + zExplodeOffset);
-      }
+      mesh.scale.set(1, 1, 1);
 
       mesh.userData = {
         offsetX: pivotX,
-        isFlippedFaceDown: Boolean(shouldFlipPartInPreview || part.isPreFlippedFaceDown),
+        isFlippedFaceDown: false,
         partGroup: part.partGroup,
       };
 
@@ -534,6 +531,26 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-medium text-slate-200 border border-white/10 cursor-pointer whitespace-nowrap"
               >
                 {boxLidLiftMm > 0 ? 'Close Lid' : 'Open Lid'}
+              </button>
+            </div>
+          )}
+
+          {onToggleBoxDividers && (
+            <div className="flex items-center gap-1.5 pl-1 border-l border-white/10">
+              <button
+                type="button"
+                onClick={onToggleBoxDividers}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                  boxDividersEnabled
+                    ? 'bg-teal-500/25 text-teal-200 border border-teal-400/50 shadow-2xs ring-1 ring-teal-400/30'
+                    : 'text-slate-400 hover:text-white bg-slate-900 border border-white/10'
+                }`}
+                title="Toggle 1.0mm internal dividing walls / organizer compartments"
+              >
+                <LayoutGrid className="w-3.5 h-3.5 text-teal-400" />
+                <span>
+                  Dividers: {boxDividersEnabled ? `${boxDividerCols}×${boxDividerRows}` : 'Off'}
+                </span>
               </button>
             </div>
           )}

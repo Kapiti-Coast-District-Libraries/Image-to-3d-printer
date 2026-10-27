@@ -95,6 +95,8 @@ export interface TraceParameters {
   strokeShape?: BoxOutlineShape; // 'contour' (follows logo), 'square' (1:1 box), 'circle' (round box), 'rectangle' (fitted rect)
   shapePaddingMm?: number; // Margin around the traced logo inside the square/circle/rect cavity in mm (e.g. 3.5mm)
   shapeCornerRadiusMm?: number; // Corner fillet radius for 'square' and 'rectangle' in mm (e.g. 4.0mm)
+  rectDepthMm?: number; // Physical length/depth (Y) in millimeters when strokeShape is 'rectangle' (e.g. 65mm)
+  logoScalePercent?: number; // Scaling factor for the artwork logo on geometric lids in % (20% .. 120%, default 100%)
   strokeWidthMm: number; // Physical stroke outline width in millimeters (e.g. 2.5mm)
   strokeColorHex: string; // Chosen colour for the stroke outline and base
   strokeFillInnerGaps: boolean; // Fills enclosed interior holes inside the stroke silhouette for a solid badge base
@@ -107,6 +109,11 @@ export interface TraceParameters {
   boxPlateLayout?: BoxPlateLayout; // 'assembled' (lid over box with lift) or 'side_by_side' (flat on Z=0 for printing)
   boxLidLiftMm?: number; // Vertical Z lift of the lid in 'assembled' preview mode (0..45mm)
   boxExportParts?: BoxExportParts; // 'both' | 'box_only' | 'lid_only'
+  boxDividersEnabled?: boolean; // When true, adds internal divider walls to create compartment organizers
+  boxDividerCols?: number; // Number of compartment columns (1..8, default 2)
+  boxDividerRows?: number; // Number of compartment rows (1..8, default 2)
+  boxDividerThicknessMm?: number; // Thickness of divider walls in millimeters (default: 1.0mm)
+  boxDividerHeightRatio?: number; // Height ratio of dividers (0.2..1.0, default: 1.0 = flush with lid support ledge)
   extrusionMode: ExtrusionMode;
   targetWidthMm: number; // e.g. 90mm
   baseThicknessMm: number; // e.g. 2.0mm
@@ -144,6 +151,11 @@ export interface MultiColorTraceResult {
   layers: TracedColorLayer[];
   detectedBgHex: string;
   resolvedMergedRegions: ResolvedMergedRegion[];
+  logoDimensionsMm?: {
+    width: number;
+    height: number;
+    scalePercent: number;
+  };
 }
 
 export function rgbToHex({ r, g, b }: RGB): string {
@@ -1482,6 +1494,9 @@ export function runMultiColorTracePipeline(
   let innerDeepCavityMask: Uint8Array | undefined = undefined;
   let resolvedMergedRegions: ResolvedMergedRegion[] = [];
   let artworkOnlyLabels: Int8Array | null = null;
+  let computedLogoDimensionsMm:
+    | { width: number; height: number; scalePercent: number }
+    | undefined = undefined;
   let geomCenter = { cx: width * 0.5, cy: height * 0.5 };
   let geomInner = { halfW: 50, halfH: 50, cornerR: 0 };
   let geomOuter = { halfW: 60, halfH: 60, cornerR: 0 };
@@ -1577,17 +1592,14 @@ export function runMultiColorTracePipeline(
         innerHalfW = maxLogoRadPx + padPx;
         innerHalfH = innerHalfW;
         innerCornerR = innerHalfW;
-      } else {
-        const baseHalfX =
-          strokeShape === 'square' ? Math.max(logoHalfW, logoHalfH) : logoHalfW;
-        const baseHalfY =
-          strokeShape === 'square' ? Math.max(logoHalfW, logoHalfH) : logoHalfH;
+      } else if (strokeShape === 'square') {
+        const baseHalfX = Math.max(logoHalfW, logoHalfH);
         computedPxPerMm = baseHalfX / logoHalfWidthMm;
         const padPx = Math.max(2.5, padMm * computedPxPerMm);
         wallPx = Math.max(2.0, wallMm * computedPxPerMm);
         ledgePx = Math.max(1.6, ledgeMm * computedPxPerMm);
         innerHalfW = baseHalfX + padPx;
-        innerHalfH = baseHalfY + padPx;
+        innerHalfH = innerHalfW;
 
         const cornerMm = Math.max(0, params.shapeCornerRadiusMm ?? 4.0);
         const reqOuterCornerR = Math.min(
@@ -1622,6 +1634,73 @@ export function runMultiColorTracePipeline(
           innerHalfW += extra;
           innerHalfH += extra;
         }
+      } else {
+        // strokeShape === 'rectangle': Fully user-controllable rectangle length/depth & aspect ratio
+        const outerHalfWMm = Math.max(12, params.targetWidthMm * 0.5);
+        const defaultDepthMm = Math.round(
+          params.targetWidthMm * (logoHalfH > 0 && logoHalfW > 0 ? logoHalfH / logoHalfW : 0.65)
+        );
+        const reqDepthMm = Math.max(15, params.rectDepthMm ?? defaultDepthMm);
+        const outerHalfHMm = Math.max(7.5, reqDepthMm * 0.5);
+
+        const innerHalfWMm = Math.max(4.0, outerHalfWMm - wallMm);
+        const innerHalfHMm = Math.max(4.0, outerHalfHMm - wallMm);
+
+        const maxLogoHalfWMm = Math.max(2.0, innerHalfWMm - padMm);
+        const maxLogoHalfHMm = Math.max(2.0, innerHalfHMm - padMm);
+
+        // Fit logo comfortably inside inner cavity with at least padMm clearance:
+        const minPxPerMmForLogo = Math.max(
+          logoHalfW / maxLogoHalfWMm,
+          logoHalfH / maxLogoHalfHMm
+        );
+
+        // Keep rectangle within canvas frame boundaries for crisp 2D preview:
+        const maxAvailPxX = Math.max(16, cx - 8);
+        const maxAvailPxY = Math.max(16, cy - 8);
+        const maxPxPerMmForOuter = Math.min(
+          maxAvailPxX / outerHalfWMm,
+          maxAvailPxY / outerHalfHMm
+        );
+
+        computedPxPerMm = Math.min(maxPxPerMmForOuter, Math.max(minPxPerMmForLogo, 0.4));
+
+        wallPx = Math.max(2.0, wallMm * computedPxPerMm);
+        ledgePx = Math.max(1.6, ledgeMm * computedPxPerMm);
+        innerHalfW = innerHalfWMm * computedPxPerMm;
+        innerHalfH = innerHalfHMm * computedPxPerMm;
+
+        const cornerMm = Math.max(0, params.shapeCornerRadiusMm ?? 4.0);
+        const reqOuterCornerR = Math.min(
+          cornerMm * computedPxPerMm,
+          innerHalfW + wallPx,
+          innerHalfH + wallPx
+        );
+        innerCornerR = Math.max(
+          0,
+          Math.min(reqOuterCornerR - wallPx, innerHalfW - 0.5, innerHalfH - 0.5)
+        );
+
+        // Ensure logo doesn't poke out of corner fillets
+        let maxSd = -Infinity;
+        for (let y = minY; y <= maxY; y++) {
+          const row = y * width;
+          for (let x = minX; x <= maxX; x++) {
+            if (activeFgMask[row + x]) {
+              const sd = sdRoundedBox2D(
+                x - cx,
+                y - cy,
+                innerHalfW,
+                innerHalfH,
+                innerCornerR
+              );
+              if (sd > maxSd) maxSd = sd;
+            }
+          }
+        }
+        if (maxSd > 0) {
+          innerCornerR = Math.max(0, innerCornerR - maxSd);
+        }
       }
 
       computedStrokeRadiusPx = wallPx;
@@ -1646,22 +1725,67 @@ export function runMultiColorTracePipeline(
       geomOuter = { halfW: outerHalfW, halfH: outerHalfH, cornerR: outerCornerR };
       geomDeep = { halfW: deepHalfW, halfH: deepHalfH, cornerR: deepCornerR };
 
+      // Logo Scaling on Geometric Lids (Square, Circle, Rectangle)
+      const rawLogoScale = (params.logoScalePercent ?? 100) / 100;
+      const logoScale = Math.max(0.15, Math.min(1.5, rawLogoScale));
+
+      const approxOuterBoxWidthMm = Math.max(15, params.targetWidthMm);
+      const pxPerMmApprox = (outerHalfW * 2) / approxOuterBoxWidthMm;
+      const logoWidthMm = Math.round((((maxX - minX) * logoScale) / pxPerMmApprox) * 10) / 10;
+      const logoHeightMm = Math.round((((maxY - minY) * logoScale) / pxPerMmApprox) * 10) / 10;
+      computedLogoDimensionsMm = {
+        width: Math.max(1, logoWidthMm),
+        height: Math.max(1, logoHeightMm),
+        scalePercent: Math.round(logoScale * 100),
+      };
+
+      // Resample 2D artwork labels around (cx, cy) so the 2D quantized preview accurately reflects the resized logo
+      const scaledArtworkLabels = new Int8Array(total).fill(-1);
+      if (Math.abs(logoScale - 1.0) < 1e-4) {
+        scaledArtworkLabels.set(artworkOnlyLabels);
+      } else {
+        for (let y = 0; y < height; y++) {
+          const dy = y - cy;
+          const origY = Math.round(cy + dy / logoScale);
+          if (origY < 0 || origY >= height) continue;
+          const row = y * width;
+          const origRow = origY * width;
+          for (let x = 0; x < width; x++) {
+            const origX = Math.round(cx + (x - cx) / logoScale);
+            if (origX >= 0 && origX < width) {
+              scaledArtworkLabels[row + x] = artworkOnlyLabels[origRow + origX];
+            }
+          }
+        }
+      }
+
       // Populate activeFgMask and activeLabels for the 2D quantizedImageData preview
       for (let y = 0; y < height; y++) {
         const row = y * width;
         const dy = y - cy;
         for (let x = 0; x < width; x++) {
           const idx = row + x;
-          if (artworkOnlyLabels[idx] >= 0) continue;
+          const artLbl = scaledArtworkLabels[idx];
+          if (artLbl >= 0) {
+            activeLabels[idx] = artLbl;
+            activeFgMask[idx] = 1;
+            continue;
+          }
           const sd = sdRoundedBox2D(x - cx, dy, innerHalfW, innerHalfH, innerCornerR);
           if (sd <= 0) {
             if (params.boxMode || params.strokeFillInnerGaps) {
               activeFgMask[idx] = 1;
               activeLabels[idx] = lidInnerFillIdx;
+            } else {
+              activeLabels[idx] = -1;
+              activeFgMask[idx] = 0;
             }
           } else if (sd <= wallPx) {
             activeFgMask[idx] = 1;
             activeLabels[idx] = strokeSlotIdx;
+          } else {
+            activeLabels[idx] = -1;
+            activeFgMask[idx] = 0;
           }
         }
       }
@@ -1925,8 +2049,28 @@ export function runMultiColorTracePipeline(
   let finalBoxInnerPlugPolygons = planarTrace.boxInnerPlugPolygons;
   let finalCombinedStrokePolygons = planarTrace.combinedStrokePolygons;
 
+  const rawLogoScale = (params.logoScalePercent ?? 100) / 100;
+  const logoScale = Math.max(0.15, Math.min(1.5, rawLogoScale));
+
+  const scalePolys = (polys: TracedPolygon[]): TracedPolygon[] => {
+    if (!isGeometricShape || Math.abs(logoScale - 1.0) < 1e-4) return polys;
+    return polys.map((poly) => ({
+      outer: poly.outer.map((p) => ({
+        x: geomCenter.cx + (p.x - geomCenter.cx) * logoScale,
+        y: geomCenter.cy + (p.y - geomCenter.cy) * logoScale,
+      })),
+      holes: poly.holes.map((h) =>
+        h.map((p) => ({
+          x: geomCenter.cx + (p.x - geomCenter.cx) * logoScale,
+          y: geomCenter.cy + (p.y - geomCenter.cy) * logoScale,
+        }))
+      ),
+      area: poly.area * logoScale * logoScale,
+    }));
+  };
+
   if (isGeometricShape) {
-    const artworkUnionPolys = planarTrace.silhouettePolygons;
+    const artworkUnionPolys = scalePolys(planarTrace.silhouettePolygons);
     const outerRing = buildAnalyticRoundedBoxRing(
       geomCenter.cx,
       geomCenter.cy,
@@ -2032,14 +2176,16 @@ export function runMultiColorTracePipeline(
             maskForColor[i] = 1;
           }
         }
-        polygons = traceBinaryMaskToPolygons(maskForColor, width, height, {
+        const unscaledPolys = traceBinaryMaskToPolygons(maskForColor, width, height, {
           smoothEpsilon: params.smoothEpsilon,
           turdSizePx: Math.max(4, Math.floor(params.minIslandPx * 0.5)),
           fieldBlurPasses: params.fieldBlurPasses,
           cornerSimplify: params.cornerSimplify,
         });
+        polygons = isGeometricShape ? scalePolys(unscaledPolys) : unscaledPolys;
       } else {
-        polygons = planarTrace.layerPolygons[c] || [];
+        const unscaledPolys = planarTrace.layerPolygons[c] || [];
+        polygons = isGeometricShape ? scalePolys(unscaledPolys) : unscaledPolys;
       }
     }
 
@@ -2094,5 +2240,6 @@ export function runMultiColorTracePipeline(
     layers,
     detectedBgHex: rgbToHex(bgRgb),
     resolvedMergedRegions,
+    logoDimensionsMm: computedLogoDimensionsMm,
   };
 }

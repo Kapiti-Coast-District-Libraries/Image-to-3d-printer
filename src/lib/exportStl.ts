@@ -267,19 +267,19 @@ export async function exportTwoPartSignStlZip(
 
   const inlayParts = model.parts.filter((p) => p !== basePart);
 
-  // 1. Base STL
+  // 1. Base STL: exported with identical (0, 0, 0) origin as inlays
   if (basePart) {
     const baseGeom = getExportGeometry(basePart, flipFaceDown, maxZ);
     const baseBuffer = geometryToBinarySTL(baseGeom, headerText);
-    zip.file(`${cleanProjectName}_Base_${basePart.colorHex.replace('#', '')}.stl`, baseBuffer);
+    zip.file(`${cleanProjectName}_Base_Plate_${maxZ.toFixed(0)}mm.stl`, baseBuffer);
   }
 
-  // 2. Merged Inlays STL (strictly 0.4mm thick for 2 layers on build bed)
+  // 2. Merged Inlays STL: strictly 0.4mm thick for 2 layers on build bed
   if (inlayParts.length > 0) {
     const flippedInlayGeoms = inlayParts.map((p) => getExportGeometry(p, flipFaceDown, maxZ));
     const mergedInlayGeom = mergeBufferGeometries(flippedInlayGeoms);
     const inlayBuffer = geometryToBinarySTL(mergedInlayGeom, headerText);
-    zip.file(`${cleanProjectName}_Inlays_0.4mm_2Layers.stl`, inlayBuffer);
+    zip.file(`${cleanProjectName}_Text_Inlay_FirstLayer_0.4mm.stl`, inlayBuffer);
   }
 
   return await zip.generateAsync({
@@ -288,4 +288,21 @@ export async function exportTwoPartSignStlZip(
     compression: 'DEFLATE',
     compressionOptions: { level: 6 },
   });
+}
+
+/**
+ * Exports a Single Merged STL:
+ * Merges everything into a single uniform 3.0mm mesh for single-colour prints or CNC/laser toolpaths.
+ */
+export function exportSingleMergedStl(
+  model: ExtrudedModelResult,
+  projectName: string,
+  flipFaceDown: boolean = true,
+  headerText: string = DEFAULT_STL_HEADER
+): Blob {
+  const maxZ = model.dimensionsMm.height;
+  const flippedGeoms = model.parts.map((p) => getExportGeometry(p, flipFaceDown, maxZ));
+  const mergedGeom = mergeBufferGeometries(flippedGeoms);
+  const arrayBuffer = geometryToBinarySTL(mergedGeom, headerText);
+  return new Blob([arrayBuffer], { type: 'application/octet-stream' });
 }

@@ -1,5 +1,10 @@
 import JSZip from 'jszip';
-import { ColorSlotConfig, MultiColorTraceResult } from './colorQuantizer';
+import {
+  ColorSlotConfig,
+  MultiColorTraceResult,
+  colorDistSq,
+  hexToRgb,
+} from './colorQuantizer';
 import { ExtrudedModelResult } from './meshExtruder';
 import { Point } from './vectorTracer';
 import { findClosestBambuFilament } from './bambuFilaments';
@@ -15,8 +20,8 @@ export interface Export3mfOptions {
 }
 
 interface ExportFilamentSlot {
-  extruderIndex: number; // 1-based (1..4+)
-  colorIndex: number; // 0-based index into <m:colorgroup> and filament_colour[]
+  extruderIndex: number; // Strictly 1-based: 1..4
+  colorIndex: number; // Strictly 0-based: 0..3 index into <m:colorgroup> and filament_colour[]
   hex: string; // #RRGGBB
   rgbaHex: string; // #RRGGBBFF
   bambuName: string;
@@ -26,21 +31,25 @@ interface ExportFilamentSlot {
   settingsId: string;
 }
 
-// Function removed: Bambu Studio slicer uses part-level extruder metadata instead of paint_color
-// which previously caused colors to scramble or slice with default filament.
+// Default fallback palette for Bambu AMS Slots 1..4
+const DEFAULT_BAMBU_4_COLORS = [
+  '#141821', // Slot 1: Charcoal Black
+  '#E12D39', // Slot 2: Scarlet Red
+  '#F59E0B', // Slot 3: Bambu Gold
+  '#F8FAFC', // Slot 4: Jade White
+];
 
 /**
  * Generates a Bambu Studio / OrcaSlicer / PrusaSlicer compatible multi-colour .3mf archive
- * that automatically loads the correct filament colours upon import or project open.
+ * that strictly uses the first 4 colors (Extruders 1, 2, 3, 4) in Bambu Studio.
  *
- * Includes:
- * 1. `<m:colorgroup id="1">` bound directly to every `<object>` (`pid="1" pindex="N"`) and
- *    every `<triangle>` (`pid="1" p1="N" p2="N" p3="N"`), enabling Bambu Studio's Standard 3MF Color Importer.
- * 2. `<basematerials id="2">` with `displaycolor="#RRGGBBFF"` and official Bambu filament names.
- * 3. `Metadata/project_settings.config` (JSON) containing `filament_colour`, `default_filament_colour`,
- *    `filament_type`, `filament_settings_id`, and `filament_ids` so Bambu Studio / OrcaSlicer project
- *    loading populates the left-sidebar Filament Slots 1-4 with the exact colours.
- * 4. `Metadata/model_settings.config` (XML) binding each manifold mesh part to its corresponding AMS Extruder.
+ * Guarantees:
+ * 1. Exactly 4 filament profiles are created in `Metadata/project_settings.config` (Extruders 1..4),
+ *    matching the 4 physical spools in a standard Bambu AMS.
+ * 2. Every single part in `Metadata/model_settings.config` has `metadata key="extruder" value="1..4"`.
+ *    No part ever requires extruder 5+, so users never have to click '+' to add more colors in Bambu Studio
+ *    or recolor parts before printing.
+ * 3. `<m:colorgroup id="1">` contains exactly 4 colors corresponding to Extruders 1..4.
  */
 export async function generateBambu3mfBlob(
   model: ExtrudedModelResult,
@@ -55,30 +64,29 @@ export async function generateBambu3mfBlob(
 
   const zip = new JSZip();
 
-  // 1. Build consolidated filament palette so AMS Slots 1..4 map cleanly and predictably.
-  // Always use `part.colorHex` which is built directly from `traceResult.layers[i].printHex`
-  // (preserving the exact K-Means detected shades from the image as well as any user overrides).
+  // 1. Build exactly 4 consolidated filament slots for AMS Slots 1..4.
+  // We inspect model parts and active slot configs to determine the best color for each of the 4 slots.
   const filamentSlots: ExportFilamentSlot[] = [];
-  const partToFilamentIdx: number[] = new Array(model.parts.length).fill(0);
 
-  const registerColorAsFilament = (rawHex: string): number => {
+  for (let s = 0; s < 4; s++) {
+    // 1. Look for a part directly mapped to this slot
+    const matchingPart = model.parts.find((p) => p.slotIndex === s);
+    // 2. Look for user-provided slot config
+    const slotCfg = options.slotConfigs?.find((c) => c.id === s);
+
+    const rawHex =
+      matchingPart?.colorHex ||
+      slotCfg?.printHex ||
+      DEFAULT_BAMBU_4_COLORS[s];
+
     const match = findClosestBambuFilament(rawHex);
     const finalHex = (snapToOfficialBambuHex ? match.preset.hex : rawHex).toUpperCase();
     const hexClean = finalHex.replace('#', '');
     const normalizedHex = `#${hexClean}`;
 
-    // Reuse existing filament slot if identical hex is already registered
-    const existingIdx = filamentSlots.findIndex(
-      (f) => f.hex.toUpperCase() === normalizedHex
-    );
-    if (existingIdx !== -1) {
-      return existingIdx;
-    }
-
-    const colorIndex = filamentSlots.length;
     filamentSlots.push({
-      extruderIndex: colorIndex + 1,
-      colorIndex,
+      extruderIndex: s + 1, // Strictly 1, 2, 3, 4
+      colorIndex: s,        // Strictly 0, 1, 2, 3
       hex: normalizedHex,
       rgbaHex: `#${hexClean}FF`,
       bambuName: match.preset.name,
@@ -87,31 +95,46 @@ export async function generateBambu3mfBlob(
       filamentId: match.preset.filamentId,
       settingsId: match.preset.settingsId,
     });
-    return colorIndex;
-  };
+  }
 
-  // If slotConfigs is provided, register active slots in exact slot order (AMS Slots 1..4)
-  if (options.slotConfigs && options.slotConfigs.length > 0) {
-    for (const slot of options.slotConfigs) {
-      if (slot.mergedIntoSlot != null) continue;
-      registerColorAsFilament(slot.printHex);
+  // 2. Map every manifold mesh part in the model to one of the first 4 slots (0..3 -> Extruder 1..4).
+  // Any extra part (such as Stroke Outline or Hollow Box body at slotIndex >= 4) is mapped to its
+  // exact matching color among the 4 slots, or nearest color in RGB space, guaranteeing extruder <= 4.
+  const partToFilamentIdx: number[] = new Array(model.parts.length).fill(0);
+
+  for (let i = 0; i < model.parts.length; i++) {
+    const part = model.parts[i];
+    let filIdx = 0;
+
+    if (part.slotIndex >= 0 && part.slotIndex < 4) {
+      filIdx = part.slotIndex;
+    } else {
+      // Stroke outline, hollow box, or any secondary part:
+      // A. Check for exact hex match against one of the 4 slots
+      const partHexClean = part.colorHex.toUpperCase().replace('#', '');
+      const exactIdx = filamentSlots.findIndex(
+        (f) => f.hex.replace('#', '').toUpperCase() === partHexClean
+      );
+      if (exactIdx !== -1) {
+        filIdx = exactIdx;
+      } else {
+        // B. Find closest color match in RGB space
+        let bestDist = Infinity;
+        let bestIdx = 0;
+        const partRgb = hexToRgb(part.colorHex);
+        for (let s = 0; s < 4; s++) {
+          const d = colorDistSq(partRgb, hexToRgb(filamentSlots[s].hex));
+          if (d < bestDist) {
+            bestDist = d;
+            bestIdx = s;
+          }
+        }
+        filIdx = bestIdx;
+      }
     }
-  }
 
-  // Register parts in slot order (0..3+) using each part's authoritative colorHex
-  const sortedPartsWithOriginalIndex = model.parts
-    .map((part, idx) => ({ part, idx }))
-    .sort((a, b) => a.part.slotIndex - b.part.slotIndex);
-
-  for (const { part, idx } of sortedPartsWithOriginalIndex) {
-    const hexToUse = part.colorHex;
-    const filIdx = registerColorAsFilament(hexToUse);
-    partToFilamentIdx[idx] = filIdx;
-  }
-
-  // Ensure at least 1 filament exists
-  if (filamentSlots.length === 0) {
-    registerColorAsFilament('#161618');
+    // Safety clamp strictly to 0..3 (Extruder 1..4)
+    partToFilamentIdx[i] = Math.max(0, Math.min(3, filIdx));
   }
 
   // 2. [Content_Types].xml
@@ -167,11 +190,11 @@ export async function generateBambu3mfBlob(
     const extruderNum = fil.extruderIndex;
     const partDisplayName =
       part.partGroup === 'box'
-        ? `Hollow_Box_${fil.bambuName.replace(/\s+/g, '_')}_${fil.hex.replace('#', '')}`
+        ? `Hollow_Box_Slot_${extruderNum}_${fil.bambuName.replace(/\s+/g, '_')}_${fil.hex.replace('#', '')}`
         : part.partGroup === 'lid'
         ? `Lid_Slot_${extruderNum}_${fil.bambuName.replace(/\s+/g, '_')}_${fil.hex.replace('#', '')}`
         : part.slotIndex === 4
-        ? `Stroke_Base_${fil.bambuName.replace(/\s+/g, '_')}_${fil.hex.replace('#', '')}`
+        ? `Stroke_Base_Slot_${extruderNum}_${fil.bambuName.replace(/\s+/g, '_')}_${fil.hex.replace('#', '')}`
         : `Slot_${extruderNum}_${fil.bambuName.replace(/\s+/g, '_')}_${fil.hex.replace('#', '')}`;
 
     // Determine whether this specific part should be rotated 180 deg around Y for face-down PEI printing:

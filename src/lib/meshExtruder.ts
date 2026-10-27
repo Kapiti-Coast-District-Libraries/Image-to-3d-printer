@@ -133,6 +133,108 @@ function offsetRingVec2(ring: THREE.Vector2[], offsetMm: number): THREE.Vector2[
 }
 
 /**
+ * Creates a watertight 2-manifold indexed 3D box prism [x0..x1, y0..y1, z0..z1]
+ * with strictly outward-oriented face normals.
+ */
+function createBoxPrismMesh(
+  x0: number,
+  x1: number,
+  y0: number,
+  y1: number,
+  z0: number,
+  z1: number
+): { vertices: Vec3[]; triangles: [number, number, number][] } {
+  const minX = Math.min(x0, x1);
+  const maxX = Math.max(x0, x1);
+  const minY = Math.min(y0, y1);
+  const maxY = Math.max(y0, y1);
+  const minZ = Math.min(z0, z1);
+  const maxZ = Math.max(z0, z1);
+
+  const vertices: Vec3[] = [
+    { x: minX, y: minY, z: minZ }, // 0
+    { x: maxX, y: minY, z: minZ }, // 1
+    { x: maxX, y: maxY, z: minZ }, // 2
+    { x: minX, y: maxY, z: minZ }, // 3
+    { x: minX, y: minY, z: maxZ }, // 4
+    { x: maxX, y: minY, z: maxZ }, // 5
+    { x: maxX, y: maxY, z: maxZ }, // 6
+    { x: minX, y: maxY, z: maxZ }, // 7
+  ];
+
+  const triangles: [number, number, number][] = [
+    // Bottom (-Z)
+    [0, 2, 1],
+    [0, 3, 2],
+    // Top (+Z)
+    [4, 5, 6],
+    [4, 6, 7],
+    // Front (-Y)
+    [0, 1, 5],
+    [0, 5, 4],
+    // Back (+Y)
+    [2, 3, 7],
+    [2, 7, 6],
+    // Left (-X)
+    [0, 7, 3],
+    [0, 4, 7],
+    // Right (+X)
+    [1, 2, 6],
+    [1, 6, 5],
+  ];
+
+  return { vertices, triangles };
+}
+
+function getVerticalIntersections(ring: Point[], xCoord: number): number[] {
+  const n = ring.length;
+  const ys: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p1 = ring[i];
+    const p2 = ring[(i + 1) % n];
+    const minX = Math.min(p1.x, p2.x);
+    const maxX = Math.max(p1.x, p2.x);
+    if (xCoord >= minX && xCoord <= maxX && Math.abs(p2.x - p1.x) > 1e-5) {
+      const t = (xCoord - p1.x) / (p2.x - p1.x);
+      const y = p1.y + t * (p2.y - p1.y);
+      ys.push(y);
+    }
+  }
+  ys.sort((a, b) => a - b);
+  const uniqueYs: number[] = [];
+  for (const y of ys) {
+    if (uniqueYs.length === 0 || Math.abs(y - uniqueYs[uniqueYs.length - 1]) > 1e-3) {
+      uniqueYs.push(y);
+    }
+  }
+  return uniqueYs;
+}
+
+function getHorizontalIntersections(ring: Point[], yCoord: number): number[] {
+  const n = ring.length;
+  const xs: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p1 = ring[i];
+    const p2 = ring[(i + 1) % n];
+    const minY = Math.min(p1.y, p2.y);
+    const maxY = Math.max(p1.y, p2.y);
+    if (yCoord >= minY && yCoord <= maxY && Math.abs(p2.y - p1.y) > 1e-5) {
+      const t = (yCoord - p1.y) / (p2.y - p1.y);
+      const x = p1.x + t * (p2.x - p1.x);
+      xs.push(x);
+    }
+  }
+  xs.sort((a, b) => a - b);
+  const uniqueXs: number[] = [];
+  for (const x of xs) {
+    if (uniqueXs.length === 0 || Math.abs(x - uniqueXs[uniqueXs.length - 1]) > 1e-3) {
+      uniqueXs.push(x);
+    }
+  }
+  return uniqueXs;
+}
+
+/**
  * Extrudes a set of 2D TracedPolygons (with holes) into a watertight indexed 3D mesh
  * between zBottom and zTop.
  */
@@ -407,6 +509,7 @@ export function buildExtrudedModel(
         ? boxWidthMm
         : Math.max(12, boxWidthMm - 2 * strokeWidthMm);
 
+    const plugDepthMm = Math.min(2.2, Math.max(1.2, floorThicknessMm * 0.9));
     let boxOffsetX = 0;
     let lidOffsetX = 0;
     let lidZBase = 0;
@@ -415,9 +518,9 @@ export function buildExtrudedModel(
       const gapMm = 8;
       boxOffsetX = -(approxLidWidthMm + gapMm) * 0.5;
       lidOffsetX = (boxWidthMm + gapMm) * 0.5;
-      lidZBase = 0;
+      lidZBase = lidStyle === 'cap_with_plug' ? plugDepthMm : 0;
     } else if (exportParts === 'lid_only') {
-      lidZBase = 0;
+      lidZBase = lidStyle === 'cap_with_plug' ? plugDepthMm : 0;
     } else {
       // Assembled view: position lid inside/above the box at seated Z + lidLiftMm
       if (lidStyle === 'flush_recessed') {
@@ -513,6 +616,196 @@ export function buildExtrudedModel(
         );
       }
 
+      // 4. Internal Divider Walls (Compartment Grid)
+      if (params.boxDividersEnabled) {
+        const cols = Math.max(1, Math.min(8, Math.round(params.boxDividerCols ?? 1)));
+        const rows = Math.max(1, Math.min(8, Math.round(params.boxDividerRows ?? 1)));
+        const dividerThickness = Math.max(0.6, Math.min(3.5, params.boxDividerThicknessMm ?? 1.0));
+        const heightRatio = Math.max(0.2, Math.min(1.0, params.boxDividerHeightRatio ?? 1.0));
+
+        if (cols > 1 || rows > 1) {
+          // Top Z for internal dividers: flush with support ledge or clearance below lid plug
+          const dividerMaxZ =
+            lidStyle === 'cap_with_plug'
+              ? Math.max(floorThicknessMm + 1.0, boxHeightMm - plugDepthMm - 0.2)
+              : Math.max(floorThicknessMm + 1.0, boxHeightMm - lidTotalThicknessMm - rimExtraMm);
+          const dividerTopZ = floorThicknessMm + (dividerMaxZ - floorThicknessMm) * heightRatio;
+          const dividerBottomZ = Math.max(0.2, floorThicknessMm - 0.4);
+
+          // Obtain the true inner wall cavity ring of the box in mm coordinates:
+          // upperWalls contains the actual inner face of the outer box walls (lidHoleRing).
+          // We always prefer upperWalls so dividers reach all the way to the actual walls!
+          let innerHolePts: Point[] = [];
+          for (const poly of upperWalls) {
+            if (poly.holes && poly.holes.length > 0 && poly.holes[0].length >= 3) {
+              innerHolePts = poly.holes[0].map(transformBoxPt);
+              break;
+            }
+          }
+          if (innerHolePts.length === 0) {
+            for (const poly of ledgeWalls) {
+              if (poly.holes && poly.holes.length > 0 && poly.holes[0].length >= 3) {
+                innerHolePts = poly.holes[0].map(transformBoxPt);
+                break;
+              }
+            }
+          }
+
+          let cavityMinX = Infinity;
+          let cavityMaxX = -Infinity;
+          let cavityMinY = Infinity;
+          let cavityMaxY = -Infinity;
+
+          if (innerHolePts.length >= 3) {
+            for (const p of innerHolePts) {
+              if (p.x < cavityMinX) cavityMinX = p.x;
+              if (p.x > cavityMaxX) cavityMaxX = p.x;
+              if (p.y < cavityMinY) cavityMinY = p.y;
+              if (p.y > cavityMaxY) cavityMaxY = p.y;
+            }
+          } else {
+            for (const poly of traceResult.silhouettePolygons) {
+              for (const p of poly.outer) {
+                const tp = transformBoxPt(p);
+                if (tp.x < cavityMinX) cavityMinX = tp.x;
+                if (tp.x > cavityMaxX) cavityMaxX = tp.x;
+                if (tp.y < cavityMinY) cavityMinY = tp.y;
+                if (tp.y > cavityMaxY) cavityMaxY = tp.y;
+              }
+            }
+            const wallW = params.strokeWidthMm || 2.5;
+            cavityMinX += wallW;
+            cavityMaxX -= wallW;
+            cavityMinY += wallW;
+            cavityMaxY -= wallW;
+          }
+
+          const cavitySpanX = cavityMaxX - cavityMinX;
+          const cavitySpanY = cavityMaxY - cavityMinY;
+
+          if (cavitySpanX > 4 && cavitySpanY > 4) {
+            // Anchor 1.2 to 2.2 mm into the outer wall (approx 75% of wall thickness)
+            // guaranteeing 100% full contact and zero gap at all wall junctions
+            const wallThickness = Math.max(0.8, params.strokeWidthMm || 2.5);
+            const anchorMm = Math.max(1.2, Math.min(2.2, wallThickness * 0.75));
+
+            // Vertical Dividers (dividing into 'cols' columns)
+            if (cols > 1) {
+              for (let c = 1; c < cols; c++) {
+                const xCoord = cavityMinX + (c / cols) * cavitySpanX;
+                let yStart = cavityMinY;
+                let yEnd = cavityMaxY;
+
+                if (innerHolePts.length >= 3) {
+                  const ysCenter = getVerticalIntersections(innerHolePts, xCoord);
+                  const ysLeft = getVerticalIntersections(
+                    innerHolePts,
+                    xCoord - dividerThickness * 0.5
+                  );
+                  const ysRight = getVerticalIntersections(
+                    innerHolePts,
+                    xCoord + dividerThickness * 0.5
+                  );
+
+                  const startCandidates: number[] = [];
+                  const endCandidates: number[] = [];
+
+                  if (ysCenter.length >= 2) {
+                    startCandidates.push(ysCenter[0]);
+                    endCandidates.push(ysCenter[ysCenter.length - 1]);
+                  }
+                  if (ysLeft.length >= 2) {
+                    startCandidates.push(ysLeft[0]);
+                    endCandidates.push(ysLeft[ysLeft.length - 1]);
+                  }
+                  if (ysRight.length >= 2) {
+                    startCandidates.push(ysRight[0]);
+                    endCandidates.push(ysRight[ysRight.length - 1]);
+                  }
+
+                  if (startCandidates.length > 0) {
+                    yStart = Math.min(...startCandidates);
+                  }
+                  if (endCandidates.length > 0) {
+                    yEnd = Math.max(...endCandidates);
+                  }
+                }
+
+                if (yEnd > yStart) {
+                  appendBoxMesh(
+                    createBoxPrismMesh(
+                      xCoord - dividerThickness * 0.5,
+                      xCoord + dividerThickness * 0.5,
+                      yStart - anchorMm,
+                      yEnd + anchorMm,
+                      dividerBottomZ,
+                      dividerTopZ
+                    )
+                  );
+                }
+              }
+            }
+
+            // Horizontal Dividers (dividing into 'rows' rows)
+            if (rows > 1) {
+              for (let r = 1; r < rows; r++) {
+                const yCoord = cavityMinY + (r / rows) * cavitySpanY;
+                let xStart = cavityMinX;
+                let xEnd = cavityMaxX;
+
+                if (innerHolePts.length >= 3) {
+                  const xsCenter = getHorizontalIntersections(innerHolePts, yCoord);
+                  const xsBottom = getHorizontalIntersections(
+                    innerHolePts,
+                    yCoord - dividerThickness * 0.5
+                  );
+                  const xsTop = getHorizontalIntersections(
+                    innerHolePts,
+                    yCoord + dividerThickness * 0.5
+                  );
+
+                  const startCandidates: number[] = [];
+                  const endCandidates: number[] = [];
+
+                  if (xsCenter.length >= 2) {
+                    startCandidates.push(xsCenter[0]);
+                    endCandidates.push(xsCenter[xsCenter.length - 1]);
+                  }
+                  if (xsBottom.length >= 2) {
+                    startCandidates.push(xsBottom[0]);
+                    endCandidates.push(xsBottom[xsBottom.length - 1]);
+                  }
+                  if (xsTop.length >= 2) {
+                    startCandidates.push(xsTop[0]);
+                    endCandidates.push(xsTop[xsTop.length - 1]);
+                  }
+
+                  if (startCandidates.length > 0) {
+                    xStart = Math.min(...startCandidates);
+                  }
+                  if (endCandidates.length > 0) {
+                    xEnd = Math.max(...endCandidates);
+                  }
+                }
+
+                if (xEnd > xStart) {
+                  appendBoxMesh(
+                    createBoxPrismMesh(
+                      xStart - anchorMm,
+                      xEnd + anchorMm,
+                      yCoord - dividerThickness * 0.5,
+                      yCoord + dividerThickness * 0.5,
+                      dividerBottomZ,
+                      dividerTopZ
+                    )
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
+
       if (boxVertices.length > 0 && boxTriangles.length > 0) {
         if (boxHeightMm > maxZHeight) maxZHeight = boxHeightMm;
         const strokeHex = (params.strokeColorHex || '#F8FAFC').toUpperCase();
@@ -544,23 +837,15 @@ export function buildExtrudedModel(
           ? 1.0
           : Math.max(0.92, (approxLidWidthMm - toleranceMm) / approxLidWidthMm);
 
-      // In 'cap_with_plug' when laid out on the print plate (Z=0), orient the cap lid face-down so the
-      // narrower locking plug sits on top (Z = lidTotalThicknessMm .. lidTotalThicknessMm + plugDepthMm)
-      // for 100% support-free printing.
-      const isCapOnPrintPlate =
-        lidStyle === 'cap_with_plug' &&
-        (plateLayout === 'side_by_side' || exportParts === 'lid_only');
-
       const transformLidPt = (pt: Point): Point => {
         const rx = (pt.x - centerX) * scaleMmPerPx * lidClearanceScale;
         const ry = -(pt.y - centerY) * scaleMmPerPx * lidClearanceScale;
         return {
-          x: (isCapOnPrintPlate ? -rx : rx) + lidOffsetX,
+          x: rx + lidOffsetX,
           y: ry,
         };
       };
 
-      const plugDepthMm = Math.min(2.2, Math.max(1.2, floorThicknessMm * 0.9));
       const lidBackingPolys =
         lidStyle === 'cap_with_plug'
           ? traceResult.silhouettePolygons
@@ -569,13 +854,10 @@ export function buildExtrudedModel(
           : traceResult.silhouettePolygons;
 
       const lidOverallZMin =
-        lidStyle === 'cap_with_plug' && !isCapOnPrintPlate
+        lidStyle === 'cap_with_plug'
           ? lidZBase - plugDepthMm
           : lidZBase;
-      const lidOverallZMax =
-        lidStyle === 'cap_with_plug' && isCapOnPrintPlate
-          ? lidZBase + lidTotalThicknessMm + plugDepthMm
-          : lidZBase + lidTotalThicknessMm;
+      const lidOverallZMax = lidZBase + lidTotalThicknessMm;
 
       for (const layer of artworkLayers) {
         const lidVertices: Vec3[] = [];
@@ -622,113 +904,60 @@ export function buildExtrudedModel(
             )
           );
         } else if (params.extrusionMode === 'backed_inlay') {
-          if (isCapOnPrintPlate) {
-            // Face-down Cap Lid on print plate:
-            // Inlays at Z = 0 .. lidInlayThicknessMm, Backing at lidInlayThicknessMm .. lidTotalThicknessMm, Plug on top
-            if (isLidBackingSlot) {
-              partZMin = lidZBase;
-              partZMax = lidZBase + lidTotalThicknessMm + plugDepthMm;
+          // Upright Lid: Solid backing plate on bottom, multi-colour inlays on top (+Z) facing user
+          const topZ = lidZBase + lidBaseThicknessMm + lidInlayThicknessMm;
+          if (isLidBackingSlot) {
+            partZMin = lidStyle === 'cap_with_plug' ? lidZBase - plugDepthMm : lidZBase;
+            partZMax = topZ;
+            // Solid lid backing plate
+            appendLidMesh(
+              extrudePolygonsToManifold(
+                lidBackingPolys,
+                transformLidPt,
+                lidZBase,
+                lidZBase + lidBaseThicknessMm,
+                0
+              )
+            );
+            // Top colour inlay for the backing slot
+            appendLidMesh(
+              extrudePolygonsToManifold(
+                combinedLayerPolys,
+                transformLidPt,
+                lidZBase + lidBaseThicknessMm,
+                topZ,
+                params.seamOverlapMm
+              )
+            );
+            // If 'cap_with_plug', add downward locking plug lip
+            if (
+              lidStyle === 'cap_with_plug' &&
+              traceResult.boxInnerPlugPolygons.length > 0
+            ) {
               appendLidMesh(
                 extrudePolygonsToManifold(
-                  combinedLayerPolys,
+                  traceResult.boxInnerPlugPolygons,
                   transformLidPt,
+                  lidZBase - plugDepthMm,
                   lidZBase,
-                  lidZBase + lidInlayThicknessMm,
-                  params.seamOverlapMm
-                )
-              );
-              appendLidMesh(
-                extrudePolygonsToManifold(
-                  lidBackingPolys,
-                  transformLidPt,
-                  lidZBase + lidInlayThicknessMm,
-                  lidZBase + lidTotalThicknessMm,
-                  0
-                )
-              );
-              if (traceResult.boxInnerPlugPolygons.length > 0) {
-                appendLidMesh(
-                  extrudePolygonsToManifold(
-                    traceResult.boxInnerPlugPolygons,
-                    transformLidPt,
-                    lidZBase + lidTotalThicknessMm,
-                    lidZBase + lidTotalThicknessMm + plugDepthMm,
-                    0,
-                    0,
-                    -toleranceMm * 0.5
-                  )
-                );
-              }
-            } else {
-              partZMin = lidZBase;
-              partZMax = lidZBase + lidInlayThicknessMm;
-              appendLidMesh(
-                extrudePolygonsToManifold(
-                  combinedLayerPolys,
-                  transformLidPt,
-                  partZMin,
-                  partZMax,
-                  params.seamOverlapMm
+                  0,
+                  0,
+                  -toleranceMm * 0.5
                 )
               );
             }
           } else {
-            // Upright Lid (either drop-in recessed lid or assembled cap lid)
-            const topZ = lidZBase + lidBaseThicknessMm + lidInlayThicknessMm;
-            if (isLidBackingSlot) {
-              partZMin = lidZBase;
-              partZMax = topZ;
-              // Solid lid backing plate
-              appendLidMesh(
-                extrudePolygonsToManifold(
-                  lidBackingPolys,
-                  transformLidPt,
-                  lidZBase,
-                  lidZBase + lidBaseThicknessMm,
-                  0
-                )
-              );
-              // Top colour inlay for the backing slot
-              appendLidMesh(
-                extrudePolygonsToManifold(
-                  combinedLayerPolys,
-                  transformLidPt,
-                  lidZBase + lidBaseThicknessMm,
-                  topZ,
-                  params.seamOverlapMm
-                )
-              );
-              // If 'cap_with_plug' in assembled preview mode, add downward locking plug lip
-              if (
-                lidStyle === 'cap_with_plug' &&
-                traceResult.boxInnerPlugPolygons.length > 0
-              ) {
-                partZMin = lidZBase - plugDepthMm;
-                appendLidMesh(
-                  extrudePolygonsToManifold(
-                    traceResult.boxInnerPlugPolygons,
-                    transformLidPt,
-                    lidZBase - plugDepthMm,
-                    lidZBase,
-                    0,
-                    0,
-                    -toleranceMm * 0.5
-                  )
-                );
-              }
-            } else {
-              partZMin = lidZBase + lidBaseThicknessMm;
-              partZMax = topZ;
-              appendLidMesh(
-                extrudePolygonsToManifold(
-                  combinedLayerPolys,
-                  transformLidPt,
-                  partZMin,
-                  partZMax,
-                  params.seamOverlapMm
-                )
-              );
-            }
+            partZMin = lidZBase + lidBaseThicknessMm;
+            partZMax = topZ;
+            appendLidMesh(
+              extrudePolygonsToManifold(
+                combinedLayerPolys,
+                transformLidPt,
+                partZMin,
+                partZMax,
+                params.seamOverlapMm
+              )
+            );
           }
         } else if (params.extrusionMode === 'stepped_relief') {
           const step = lidInlayThicknessMm;
@@ -760,7 +989,7 @@ export function buildExtrudedModel(
             offsetX: lidOffsetX,
             lidZMin: lidOverallZMin,
             lidZMax: lidOverallZMax,
-            isPreFlippedFaceDown: isCapOnPrintPlate,
+            isPreFlippedFaceDown: false,
             vertices: lidVertices,
             triangles: lidTriangles,
             zMin: partZMin,
