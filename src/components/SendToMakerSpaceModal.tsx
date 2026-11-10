@@ -22,7 +22,7 @@ import {
 import { submitPrintJob } from '../services/submissionService';
 import {
   PrintEstimateMetrics,
-  encodeImageDataToCompactDataUrl,
+  encodeImageDataForSubmission,
 } from '../lib/printEstimator';
 
 interface SendToMakerSpaceModalProps {
@@ -71,7 +71,7 @@ export const SendToMakerSpaceModal: React.FC<SendToMakerSpaceModalProps> = ({
       const refId = generateTicketReferenceId(pickupLocation);
       const compactDataUrl =
         config.sampleId === 'custom' && sourceImageData
-          ? encodeImageDataToCompactDataUrl(sourceImageData, 240)
+          ? encodeImageDataForSubmission(sourceImageData)
           : null;
 
       const fullConfig: CustomizerConfig = {

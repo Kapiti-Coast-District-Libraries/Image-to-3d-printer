@@ -172,7 +172,9 @@ export async function generateBambu3mfBlob(
   const objectXmlBlocks: string[] = [];
   const hasBoxParts = model.parts.some((p) => p.partGroup === 'box');
   const hasLidParts = model.parts.some((p) => p.partGroup === 'lid');
-  const splitBoxAndLidAssemblies = hasBoxParts && hasLidParts;
+  // A print-in-place hinged box must stay one object so the slicer can't separate box and lid
+  const isPrintInPlace = model.parts.some((p) => p.printInPlaceLinked);
+  const splitBoxAndLidAssemblies = hasBoxParts && hasLidParts && !isPrintInPlace;
 
   const mainComponentLines: string[] = [];
   const mainBambuPartBlocks: string[] = [];

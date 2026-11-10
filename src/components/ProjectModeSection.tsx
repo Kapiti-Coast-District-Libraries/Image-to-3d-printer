@@ -7,6 +7,7 @@ import {
   TraceParameters,
   MultiColorTraceResult,
 } from '../lib/colorQuantizer';
+import { lidStyleSupportsShape, resolveArtworkBaseSlot, resolveBoxLidStyle } from '../lib/meshExtruder';
 import { PackageOpen, ShieldCheck, Ruler, RotateCcw, LayoutGrid, Scaling } from 'lucide-react';
 
 export const BAMBU_FILAMENT_SWATCHES = [
@@ -19,6 +20,70 @@ export const BAMBU_FILAMENT_SWATCHES = [
   { name: 'Electric Cyan', hex: '#06B6D4' },
   { name: 'Cobalt Blue', hex: '#2563EB' },
 ];
+
+/**
+ * Picks which artwork colour forms the background around the artwork (the lid surround in box mode,
+ * the backing plate for frameless plaques). Choosing from the artwork's own colours keeps the print
+ * within the 4 AMS slots; change that slot's filament colour to get any other shade.
+ */
+const SurroundColorPicker: React.FC<{
+  params: TraceParameters;
+  setParams: React.Dispatch<React.SetStateAction<TraceParameters>>;
+  traceResult: MultiColorTraceResult | null;
+  label: string;
+  hint: string;
+}> = ({ params, setParams, traceResult, label, hint }) => {
+  if (!traceResult) return null;
+  const layers = traceResult.layers.filter(
+    (l) => !l.isStrokeAndBase && l.enabled && l.mergedIntoSlot == null && l.pixelCount > 0
+  );
+  if (layers.length === 0) return null;
+  const active = resolveArtworkBaseSlot(traceResult, params);
+  const auto = params.baseSlotAuto !== false;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-slate-700 font-semibold">{label}</span>
+        <button
+          type="button"
+          onClick={() => setParams((p) => ({ ...p, baseSlotAuto: p.baseSlotAuto === false }))}
+          title="Automatically use the artwork colour that matches the picture's own background"
+          className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border cursor-pointer transition-colors ${
+            auto
+              ? 'bg-teal-50 text-teal-800 border-teal-300'
+              : 'bg-white text-slate-500 border-slate-300 hover:text-slate-800'
+          }`}
+        >
+          {auto ? '✓ Auto (matches picture)' : 'Auto'}
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {layers.map((l) => (
+          <button
+            key={l.slotIndex}
+            type="button"
+            onClick={() =>
+              setParams((p) => ({ ...p, baseSlotIndex: l.slotIndex, baseSlotAuto: false }))
+            }
+            title={`AMS Slot ${l.slotIndex + 1} (${l.printHex})`}
+            className={`flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-lg border text-[10px] font-mono cursor-pointer transition-all ${
+              active === l.slotIndex
+                ? 'border-teal-600 ring-2 ring-teal-500/30 bg-teal-50 text-teal-900 font-bold'
+                : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400'
+            }`}
+          >
+            <span
+              className="w-5 h-5 rounded border border-black/10"
+              style={{ backgroundColor: l.printHex }}
+            />
+            Slot {l.slotIndex + 1}
+          </button>
+        ))}
+      </div>
+      <p className="text-[10px] text-slate-500 leading-snug">{hint}</p>
+    </div>
+  );
+};
 
 interface ProjectModeSectionProps {
   params: TraceParameters;
@@ -168,72 +233,44 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                 </span>
               </div>
 
-              {/* Quick Proportions / Aspect Ratio Presets */}
+              {/* Rectangle Width (X) Slider + Number Input */}
               <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] text-slate-500">
-                  <span>Aspect Ratio Presets</span>
-                  <span className="font-mono text-slate-600">
-                    {(params.targetWidthMm / (params.rectDepthMm ?? 65)).toFixed(2)} : 1
-                  </span>
-                </div>
-                <div className="grid grid-cols-6 gap-1">
-                  {[
-                    { label: '16:9', factor: 9 / 16 },
-                    { label: '3:2', factor: 2 / 3 },
-                    { label: '4:3', factor: 3 / 4 },
-                    { label: '2:1', factor: 1 / 2 },
-                    { label: '1:2', factor: 2 / 1 },
-                  ].map(({ label, factor }) => {
-                    const targetVal = Math.round(params.targetWidthMm * factor);
-                    const isCurrent = Math.abs((params.rectDepthMm ?? 65) - targetVal) <= 1;
-                    return (
-                      <button
-                        key={label}
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => ({
-                            ...p,
-                            rectDepthMm: targetVal,
-                          }))
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-slate-700 font-medium">Rectangle Width (X)</span>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      min={20}
+                      max={250}
+                      step={1}
+                      value={params.targetWidthMm}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!isNaN(val) && val > 0) {
+                          setParams((p) => ({ ...p, targetWidthMm: Math.min(250, Math.max(20, val)) }));
                         }
-                        className={`py-1 rounded text-[10px] font-semibold transition-all cursor-pointer truncate ${
-                          isCurrent
-                            ? 'bg-teal-700 text-white font-bold shadow-2xs'
-                            : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const ratio =
-                        traceResult && traceResult.width > 0 && traceResult.height > 0
-                          ? traceResult.height / traceResult.width
-                          : 0.65;
-                      setParams((p) => ({
-                        ...p,
-                        rectDepthMm: Math.min(
-                          250,
-                          Math.max(20, Math.round(p.targetWidthMm * ratio))
-                        ),
-                      }));
-                    }}
-                    className="py-1 rounded text-[10px] font-semibold bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 transition-all cursor-pointer truncate"
-                    title="Fit rectangle to artwork aspect ratio"
-                  >
-                    Fit Logo
-                  </button>
+                      }}
+                      className="w-14 font-mono text-[11px] font-bold text-teal-800 bg-white border border-slate-300 rounded px-1.5 py-0.5 text-right"
+                    />
+                    <span className="text-slate-500 font-medium">mm</span>
+                  </div>
                 </div>
+                <input
+                  type="range"
+                  min={20}
+                  max={250}
+                  step={1}
+                  value={params.targetWidthMm}
+                  onChange={(e) => setParams((p) => ({ ...p, targetWidthMm: parseFloat(e.target.value) }))}
+                  className="w-full accent-blue-600 cursor-pointer"
+                />
               </div>
 
               {/* Rectangle Length (Y) Slider + Number Input */}
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-[11px]">
                   <span className="text-slate-700 font-medium">
-                    Rectangle Depth / Length (Y)
+                    Rectangle Length (Y)
                   </span>
                   <div className="flex items-center gap-1">
                     <input
@@ -310,47 +347,6 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                       ? `${traceResult.logoDimensionsMm.width.toFixed(1)} × ${traceResult.logoDimensionsMm.height.toFixed(1)} mm`
                       : `${params.logoScalePercent ?? 85}% Scale`}
                   </span>
-                </div>
-              </div>
-
-              {/* Quick Size Scale Presets */}
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] text-slate-500">
-                  <span>Scale Presets</span>
-                  <span className="font-mono text-slate-600 font-semibold">
-                    {params.logoScalePercent ?? 85}% of Lid Cavity
-                  </span>
-                </div>
-                <div className="grid grid-cols-5 gap-1">
-                  {[
-                    { label: '35%', name: 'Subtle', val: 35 },
-                    { label: '50%', name: 'Medium', val: 50 },
-                    { label: '70%', name: 'Classy', val: 70 },
-                    { label: '85%', name: 'Standard', val: 85 },
-                    { label: '100%', name: 'Fit Lid', val: 100 },
-                  ].map((preset) => {
-                    const isCur = (params.logoScalePercent ?? 85) === preset.val;
-                    return (
-                      <button
-                        key={preset.val}
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => ({
-                            ...p,
-                            logoScalePercent: preset.val,
-                          }))
-                        }
-                        className={`py-1 px-1 rounded text-[10px] font-semibold transition-all cursor-pointer truncate ${
-                          isCur
-                            ? 'bg-teal-700 text-white font-bold shadow-2xs'
-                            : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
-                        }`}
-                        title={`${preset.name} (${preset.val}%)`}
-                      >
-                        {preset.label}
-                      </button>
-                    );
-                  })}
                 </div>
               </div>
 
@@ -452,6 +448,15 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
             </div>
           )}
 
+          {/* Lid surround (background around the artwork) */}
+          <SurroundColorPicker
+            params={params}
+            setParams={setParams}
+            traceResult={traceResult}
+            label="Lid Background Colour"
+            hint="The colour around your artwork on the lid (and the lid's edge). Want a colour that isn't in your picture? Change that slot's filament in Filament Colours."
+          />
+
           {/* Box & Rim Color Swatches */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
@@ -459,6 +464,20 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                 Box Body &amp; Lid Rim Colour
               </span>
               <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setParams((p) => ({ ...p, boxColorFollowsLid: p.boxColorFollowsLid === false }))
+                  }
+                  title="When on, the box body is printed in the same colour as the lid's outer edge"
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border cursor-pointer transition-colors ${
+                    params.boxColorFollowsLid !== false
+                      ? 'bg-teal-50 text-teal-800 border-teal-300'
+                      : 'bg-white text-slate-500 border-slate-300 hover:text-slate-800'
+                  }`}
+                >
+                  {params.boxColorFollowsLid !== false ? '✓ Matches lid edge' : 'Match lid edge'}
+                </button>
                 <span className="text-[11px] font-mono text-slate-600">
                   {params.strokeColorHex}
                 </span>
@@ -469,6 +488,7 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                     setParams((p) => ({
                       ...p,
                       strokeColorHex: e.target.value.toUpperCase(),
+                      boxColorFollowsLid: false,
                     }))
                   }
                   className="w-6 h-6 rounded cursor-pointer bg-transparent border-0"
@@ -484,7 +504,7 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                     key={sw.hex}
                     type="button"
                     onClick={() =>
-                      setParams((p) => ({ ...p, strokeColorHex: sw.hex }))
+                      setParams((p) => ({ ...p, strokeColorHex: sw.hex, boxColorFollowsLid: false }))
                     }
                     className={`w-6 h-6 rounded-md border transition-transform cursor-pointer ${
                       active
@@ -592,50 +612,11 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
 
             {params.boxDividersEnabled ? (
               <div className="space-y-3 pt-1 border-t border-slate-100">
-                {/* Presets */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-slate-600">
-                    <span className="font-medium">Quick Compartment Presets</span>
-                    <span className="font-mono text-teal-800 font-bold bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded text-[10px]">
-                      {(params.boxDividerCols ?? 2) * (params.boxDividerRows ?? 2)} Compartments
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-4 gap-1">
-                    {[
-                      { label: '2×1 (Split)', cols: 2, rows: 1 },
-                      { label: '1×2 (Split)', cols: 1, rows: 2 },
-                      { label: '2×2 (4 Slots)', cols: 2, rows: 2 },
-                      { label: '3×1 (3 Slots)', cols: 3, rows: 1 },
-                      { label: '3×2 (6 Slots)', cols: 3, rows: 2 },
-                      { label: '3×3 (9 Slots)', cols: 3, rows: 3 },
-                      { label: '4×2 (8 Slots)', cols: 4, rows: 2 },
-                      { label: '1×1 (Open)', cols: 1, rows: 1 },
-                    ].map((preset) => {
-                      const isCur =
-                        (params.boxDividerCols ?? 2) === preset.cols &&
-                        (params.boxDividerRows ?? 2) === preset.rows;
-                      return (
-                        <button
-                          key={preset.label}
-                          type="button"
-                          onClick={() =>
-                            setParams((p) => ({
-                              ...p,
-                              boxDividerCols: preset.cols,
-                              boxDividerRows: preset.rows,
-                            }))
-                          }
-                          className={`py-1 px-1 rounded text-[10px] font-semibold transition-all cursor-pointer truncate ${
-                            isCur
-                              ? 'bg-teal-700 text-white font-bold shadow-2xs'
-                              : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
-                          }`}
-                        >
-                          {preset.label}
-                        </button>
-                      );
-                    })}
-                  </div>
+                <div className="flex items-center justify-between text-[11px] text-slate-600">
+                  <span className="font-medium">Compartments</span>
+                  <span className="font-mono text-teal-800 font-bold bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded text-[10px]">
+                    {(params.boxDividerCols ?? 2) * (params.boxDividerRows ?? 2)} Compartments
+                  </span>
                 </div>
 
                 {/* Custom Grid Columns & Rows */}
@@ -795,34 +776,18 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                         : ' (Low Profile / Easy Grab)'}
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setParams((p) => ({ ...p, boxDividerHeightRatio: 1.0 }))
-                      }
-                      className={`py-1 rounded text-[11px] font-semibold transition-colors cursor-pointer ${
-                        (params.boxDividerHeightRatio ?? 1.0) >= 0.95
-                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                          : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
-                      }`}
-                    >
-                      Full Height (Lid Support)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setParams((p) => ({ ...p, boxDividerHeightRatio: 0.7 }))
-                      }
-                      className={`py-1 rounded text-[11px] font-semibold transition-colors cursor-pointer ${
-                        (params.boxDividerHeightRatio ?? 1.0) < 0.95
-                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                          : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
-                      }`}
-                    >
-                      70% (Easy Pick-out)
-                    </button>
-                  </div>
+                  <input
+                    type="range"
+                    min={0.2}
+                    max={1}
+                    step={0.05}
+                    value={params.boxDividerHeightRatio ?? 1.0}
+                    onChange={(e) =>
+                      setParams((p) => ({ ...p, boxDividerHeightRatio: parseFloat(e.target.value) }))
+                    }
+                    className="w-full accent-blue-600 cursor-pointer"
+                    title="100% = flush with the lid support; lower makes items easier to grab"
+                  />
                 </div>
               </div>
             ) : (
@@ -861,26 +826,199 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                   ['flush_recessed', 'Flush + Ledge'],
                   ['raised_rim_recessed', 'Recessed Rim'],
                   ['cap_with_plug', 'Cap + Plug'],
+                  ['hinged', 'Hinged'],
+                  ['sliding', 'Sliding'],
+                  ['screw', 'Screw-On'],
                 ] as [BoxLidStyle, string][]
-              ).map(([style, label]) => (
-                <button
-                  key={style}
-                  type="button"
-                  onClick={() =>
-                    setParams((p) => ({ ...p, boxLidStyle: style }))
-                  }
-                  className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer truncate ${
-                    (params.boxLidStyle || 'cap_with_plug') === style
-                      ? 'bg-white text-teal-800 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+              ).map(([style, label]) => {
+                const supported = lidStyleSupportsShape(style, params.strokeShape);
+                const active = (params.boxLidStyle || 'cap_with_plug') === style;
+                return (
+                  <button
+                    key={style}
+                    type="button"
+                    disabled={!supported}
+                    title={
+                      supported
+                        ? undefined
+                        : style === 'sliding'
+                        ? 'Sliding lids need a Square or Rectangle box shape'
+                        : 'Screw-on lids need a Circle box shape'
+                    }
+                    onClick={() =>
+                      setParams((p) => ({
+                        ...p,
+                        boxLidStyle: style,
+                        // A hinged lid is joined to the box, so it always prints with it
+                        boxExportParts: style === 'hinged' ? 'both' : p.boxExportParts,
+                      }))
+                    }
+                    className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors truncate ${
+                      !supported
+                        ? 'text-slate-400 cursor-not-allowed'
+                        : active
+                        ? 'bg-white text-teal-800 shadow-2xs cursor-pointer'
+                        : 'text-slate-600 hover:text-slate-900 cursor-pointer'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
 
-            <div className="grid grid-cols-2 gap-2.5 pt-1">
+            {(() => {
+              const requested = params.boxLidStyle || 'cap_with_plug';
+              const resolved = resolveBoxLidStyle(params);
+              const hint: Record<BoxLidStyle, string> = {
+                flush_recessed: 'Lid drops into the top of the box and sits flush on an inner ledge.',
+                raised_rim_recessed: 'Lid drops in below a raised rim that frames the artwork.',
+                cap_with_plug: 'Lid sits on top of the walls with a plug underneath that grips the box.',
+                hinged:
+                  'Print-in-place hinges along the edge you choose below (two neat hinges on wider edges). Box and lid print as one connected piece with the artwork face-down, and come off the plate already hinged. Gently flex the lid the first time to free the knuckles.',
+                sliding:
+                  'Lid slides in from the front along grooves in the side and back walls. No hinge, nothing to break.',
+                screw:
+                  'Threaded cap that screws onto a neck at the top of the round box. Prints without supports.',
+              };
+              return (
+                <div className="text-[11px] leading-snug text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+                  {requested !== resolved ? (
+                    <span className="text-amber-700">
+                      {requested === 'sliding'
+                        ? 'Sliding lids need a Square or Rectangle box. Using Cap + Plug for now.'
+                        : 'Screw-on lids need a Circle box. Using Cap + Plug for now.'}
+                    </span>
+                  ) : (
+                    hint[resolved]
+                  )}
+                  {resolved === 'hinged' && (params.strokeShape || 'contour') === 'contour' && (
+                    <span className="block text-teal-700 mt-1">
+                      Contour box: the hinge automatically follows the flattest part of your shape's
+                      back edge (it can sit at an angle, or split across two bumps, like a heart's lobes).
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
+
+            {(() => {
+              const resolved = resolveBoxLidStyle(params);
+              const isMechanical =
+                resolved === 'hinged' || resolved === 'sliding' || resolved === 'screw';
+              if (!isMechanical) return null;
+              return (
+                <>
+                {resolved === 'hinged' && (
+                  <div className="space-y-1 pt-1">
+                    <span className="text-[11px] font-medium text-slate-600 block">Hinge Side</span>
+                    <div className="grid grid-cols-5 gap-1 bg-slate-100 p-1 rounded-xl">
+                      {(
+                        [
+                          ['back', 'Back'],
+                          ['front', 'Front'],
+                          ['left', 'Left'],
+                          ['right', 'Right'],
+                          ['auto', 'Best Fit'],
+                        ] as [NonNullable<TraceParameters['boxHingeSide']>, string][]
+                      ).map(([side, label]) => (
+                        <button
+                          key={side}
+                          type="button"
+                          onClick={() => setParams((p) => ({ ...p, boxHingeSide: side }))}
+                          title={
+                            side === 'auto'
+                              ? 'Puts the hinge on whichever side has the flattest edge'
+                              : `Hinge along the ${label.toLowerCase()} edge (as seen looking at the artwork)`
+                          }
+                          className={`px-1 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer truncate ${
+                            (params.boxHingeSide ?? 'back') === side
+                              ? 'bg-white text-teal-800 shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-2.5 pt-1">
+                  {resolved === 'hinged' ? (
+                    <div>
+                      <div className="flex items-center justify-between text-[11px] mb-1">
+                        <span className="text-slate-600">Hinge Gap</span>
+                        <span className="font-mono font-semibold text-teal-700">
+                          {(params.boxHingeClearanceMm ?? 0.4).toFixed(2)} mm
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.25}
+                        max={0.6}
+                        step={0.05}
+                        value={params.boxHingeClearanceMm ?? 0.4}
+                        onChange={(e) =>
+                          setParams((p) => ({
+                            ...p,
+                            boxHingeClearanceMm: parseFloat(e.target.value),
+                          }))
+                        }
+                        className="w-full accent-blue-600 cursor-pointer"
+                        title="Space between the pin and knuckles. Raise it if the hinge prints fused; lower it for a tighter hinge."
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between text-[11px] mb-1">
+                        <span className="text-slate-600">
+                          {resolved === 'screw' ? 'Thread Clearance' : 'Slide Clearance'}
+                        </span>
+                        <span className="font-mono font-semibold text-teal-700">
+                          {(params.boxLidToleranceMm ?? 0.2).toFixed(2)} mm
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.0}
+                        max={0.4}
+                        step={0.05}
+                        value={params.boxLidToleranceMm ?? 0.2}
+                        onChange={(e) =>
+                          setParams((p) => ({
+                            ...p,
+                            boxLidToleranceMm: parseFloat(e.target.value),
+                          }))
+                        }
+                        className="w-full accent-blue-600 cursor-pointer"
+                      />
+                    </div>
+                  )}
+                  {resolved !== 'screw' ? (
+                    <label className="flex items-center gap-2 text-[11px] text-slate-600 cursor-pointer self-end pb-1">
+                      <input
+                        type="checkbox"
+                        checked={params.boxLidGripTab !== false}
+                        onChange={(e) =>
+                          setParams((p) => ({ ...p, boxLidGripTab: e.target.checked }))
+                        }
+                        className="accent-teal-600 cursor-pointer"
+                      />
+                      {resolved === 'hinged' ? 'Finger-pull tab (opposite hinge)' : 'Finger-pull tab on front'}
+                    </label>
+                  ) : (
+                    <div />
+                  )}
+                </div>
+                </>
+              );
+            })()}
+
+            <div
+              className={`grid grid-cols-2 gap-2.5 pt-1 ${
+                ['hinged', 'sliding', 'screw'].includes(resolveBoxLidStyle(params)) ? 'hidden' : ''
+              }`}
+            >
               <div>
                 <div className="flex items-center justify-between text-[11px] mb-1">
                   <span className="text-slate-600">
@@ -933,8 +1071,12 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
             </div>
           </div>
 
-          {/* Parts to Export */}
-          <div className="space-y-1 pt-1 border-t border-slate-200/80">
+          {/* Parts to Export (not offered for hinged boxes: box and lid are joined) */}
+          <div
+            className={`space-y-1 pt-1 border-t border-slate-200/80 ${
+              resolveBoxLidStyle(params) === 'hinged' ? 'hidden' : ''
+            }`}
+          >
             <span className="text-[11px] font-medium text-slate-600 block">
               Parts to Include on Plate &amp; Export
             </span>
@@ -990,6 +1132,16 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
               {params.strokeEnabled ? 'Frame ON' : 'Add Frame'}
             </button>
           </div>
+
+          {!params.strokeEnabled && (
+            <SurroundColorPicker
+              params={params}
+              setParams={setParams}
+              traceResult={traceResult}
+              label="Backing Colour"
+              hint="The solid plate behind your artwork (shows around its edges). With a frame on, the frame colour is used instead."
+            />
+          )}
 
           {params.strokeEnabled && (
             <div className="bg-white border border-slate-200/90 rounded-xl p-3 space-y-3">
@@ -1050,6 +1202,7 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                         setParams((p) => ({
                           ...p,
                           strokeColorHex: e.target.value.toUpperCase(),
+                      boxColorFollowsLid: false,
                         }))
                       }
                       className="w-6 h-6 rounded cursor-pointer bg-transparent border-0"
@@ -1065,7 +1218,7 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                         key={sw.hex}
                         type="button"
                         onClick={() =>
-                          setParams((p) => ({ ...p, strokeColorHex: sw.hex }))
+                          setParams((p) => ({ ...p, strokeColorHex: sw.hex, boxColorFollowsLid: false }))
                         }
                         className={`w-6 h-6 rounded-md border transition-transform cursor-pointer ${
                           active

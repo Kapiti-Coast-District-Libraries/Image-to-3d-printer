@@ -8,6 +8,7 @@ import {
   ExtrusionMode,
   MergeItemTargetMode,
   MergedRegionRule,
+  KeptRegionRule,
   MultiColorTraceResult,
   RemovedColorRule,
   RGB,
@@ -19,7 +20,14 @@ import {
   rgbToHex,
   runMultiColorTracePipeline,
 } from './lib/colorQuantizer';
-import { buildExtrudedModel, ExtrudedModelResult, ManifoldMeshPart } from './lib/meshExtruder';
+import {
+  buildExtrudedModel,
+  ExtrudedModelResult,
+  ManifoldMeshPart,
+  resolveBoxLidStyle,
+  getLidEdgeColorHex,
+  pickAutoBaseSlot,
+} from './lib/meshExtruder';
 import {
   Bambu3mfColorFormat,
   generateBambu3mfBlob,
@@ -52,6 +60,7 @@ import { CleanupSection } from './components/CleanupSection';
 import { VectorTraceSection } from './components/VectorTraceSection';
 import { CustomizerConfig } from './types';
 import { computePrintEstimate, loadConfigImageData } from './lib/printEstimator';
+import { prepareTraceImageData, renderSampleTraceImageData, TRACE_MAX_DIMENSION } from './lib/imageLoader';
 import { subscribeToSubmissions } from './services/submissionService';
 import {
   Upload,
@@ -93,7 +102,7 @@ const BAMBU_FILAMENT_SWATCHES = [
   { name: 'Cobalt Blue', hex: '#2563EB' },
 ];
 
-const MAX_TRACE_DIMENSION = 460;
+const MAX_TRACE_DIMENSION = TRACE_MAX_DIMENSION;
 
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -117,6 +126,7 @@ export default function App() {
     customBgColor: null,
     removedColors: [],
     mergedRegions: [],
+    keptRegions: [],
     despeckleLevel: 1,
     minIslandPx: 18,
     smoothEpsilon: 1.15,
@@ -205,6 +215,7 @@ export default function App() {
   const [highlightedSlot, setHighlightedSlot] = useState<number | null>(null);
   const [eyedropperTarget, setEyedropperTarget] = useState<EyedropperTarget>(null);
   const [mergeItemMode, setMergeItemMode] = useState<boolean>(false);
+  const [keepAreaMode, setKeepAreaMode] = useState<boolean>(false);
   const [mergeItemTargetMode, setMergeItemTargetMode] =
     useState<MergeItemTargetMode>('surrounding');
   const [flipFaceDown, setFlipFaceDown] = useState<boolean>(true);
@@ -245,11 +256,8 @@ export default function App() {
 
   // Load initial sample artwork on mount
   const loadSampleArtwork = useCallback((sample: SampleArtwork) => {
-    const offscreen = document.createElement('canvas');
-    sample.renderToCanvas(offscreen);
-    const ctx = offscreen.getContext('2d');
-    if (!ctx) return;
-    const imgData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
+    // Samples go through the same crop / pad / scale step as uploaded images
+    const imgData = renderSampleTraceImageData(sample);
 
     setActiveSampleId(sample.id);
     setProjectName(sample.title.replace(/\s+/g, '_'));
@@ -261,6 +269,8 @@ export default function App() {
       customBgColor: null,
       removedColors: [],
       mergedRegions: [],
+      keptRegions: [],
+      baseSlotAuto: true,
       bgRemovalMode: sample.id === 'monstera_leaf' ? 'global_color' : 'perimeter_flood',
     }));
     setSlotConfigs((prev) =>
@@ -306,33 +316,14 @@ export default function App() {
       if (!dataUrl) return;
       const img = new Image();
       img.onload = () => {
-        const pad = 28;
-        const maxInner = MAX_TRACE_DIMENSION - pad * 2;
-        const scale = Math.min(1, maxInner / Math.max(img.width, img.height));
-        const innerW = Math.max(32, Math.round(img.width * scale));
-        const innerH = Math.max(32, Math.round(img.height * scale));
-        const w = innerW + pad * 2;
-        const h = innerH + pad * 2;
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-        ctx.clearRect(0, 0, w, h);
-        ctx.drawImage(img, pad, pad, innerW, innerH);
-        const corner = ctx.getImageData(pad, pad, 1, 1).data;
-        if (corner[3] >= 200) {
-          ctx.clearRect(0, 0, w, h);
-          ctx.fillStyle = `rgb(${corner[0]}, ${corner[1]}, ${corner[2]})`;
-          ctx.fillRect(0, 0, w, h);
-          ctx.drawImage(img, pad, pad, innerW, innerH);
-        }
-        const imgData = ctx.getImageData(0, 0, w, h);
+        // Auto-crops empty margins and scales the artwork to fill the trace resolution
+        const imgData = prepareTraceImageData(img, MAX_TRACE_DIMENSION).imageData;
 
         const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_');
         setProjectName(cleanName || 'Custom_Trace_4Color');
         setActiveSampleId('custom');
         setMergeItemMode(false);
+        setKeepAreaMode(false);
         setEyedropperTarget(null);
         setLoadedFromAdminRef(null);
         setParams((prev) => ({
@@ -340,6 +331,8 @@ export default function App() {
           customBgColor: null,
           removedColors: [],
           mergedRegions: [],
+          keptRegions: [],
+          baseSlotAuto: true,
         }));
         setSlotConfigs((prev) =>
           prev.map((s) => ({
@@ -395,6 +388,7 @@ export default function App() {
     params.customBgColor,
     params.removedColors,
     params.mergedRegions,
+    params.keptRegions,
     params.despeckleLevel,
     params.minIslandPx,
     params.smoothEpsilon,
@@ -588,6 +582,22 @@ export default function App() {
     return highlightedSlot;
   }, [highlightedSlot, traceResult]);
 
+  // Backing / lid surround colour defaults to the artwork colour matching the picture's own background
+  useEffect(() => {
+    if (params.baseSlotAuto === false || !traceResult) return;
+    const auto = pickAutoBaseSlot(traceResult) ?? 0;
+    if (auto !== params.baseSlotIndex) setParams((p) => ({ ...p, baseSlotIndex: auto }));
+  }, [traceResult, params.baseSlotAuto, params.baseSlotIndex]);
+
+  // Box body colour follows the lid's outer edge colour unless the user picked a box colour themselves
+  useEffect(() => {
+    if (!params.boxMode || params.boxColorFollowsLid === false || !traceResult) return;
+    const lidEdgeHex = getLidEdgeColorHex(traceResult, params);
+    if (lidEdgeHex && lidEdgeHex !== (params.strokeColorHex || '').toUpperCase()) {
+      setParams((p) => ({ ...p, strokeColorHex: lidEdgeHex }));
+    }
+  }, [traceResult, params.boxMode, params.boxColorFollowsLid, params.baseSlotIndex, params.numColors, params.strokeColorHex]);
+
   const handleSnapAllToBambuFilaments = useCallback(() => {
     if (!traceResult) return;
     setSlotConfigs((prev) =>
@@ -617,7 +627,7 @@ export default function App() {
         params.boxMode &&
         traceResult &&
         (params.boxPlateLayout === 'assembled' || (params.boxLidLiftMm ?? 0) > 0) &&
-        (params.boxExportParts ?? 'both') === 'both'
+        ((params.boxExportParts ?? 'both') === 'both' || resolveBoxLidStyle(params) === 'hinged')
           ? buildExtrudedModel(traceResult, {
               ...params,
               flipFaceDown,
@@ -680,7 +690,7 @@ export default function App() {
         params.boxMode &&
         traceResult &&
         (params.boxPlateLayout === 'assembled' || (params.boxLidLiftMm ?? 0) > 0) &&
-        (params.boxExportParts ?? 'both') === 'both'
+        ((params.boxExportParts ?? 'both') === 'both' || resolveBoxLidStyle(params) === 'hinged')
           ? buildExtrudedModel(traceResult, {
               ...params,
               flipFaceDown,
@@ -708,7 +718,7 @@ export default function App() {
         params.boxMode &&
         traceResult &&
         (params.boxPlateLayout === 'assembled' || (params.boxLidLiftMm ?? 0) > 0) &&
-        (params.boxExportParts ?? 'both') === 'both'
+        ((params.boxExportParts ?? 'both') === 'both' || resolveBoxLidStyle(params) === 'hinged')
           ? buildExtrudedModel(traceResult, {
               ...params,
               flipFaceDown,
@@ -772,11 +782,35 @@ export default function App() {
     }
   };
 
+  // "Keep Area": click a background area (e.g. inside an open outline) to restore it as artwork
+  const handleToggleKeepAreaMode = useCallback(() => {
+    setKeepAreaMode((prev) => {
+      const next = !prev;
+      if (next) {
+        setEyedropperTarget(null);
+        setMergeItemMode(false);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleKeepAreaAtPixel = useCallback((pixelX: number, pixelY: number) => {
+    setParams((prev) => {
+      const rule: KeptRegionRule = { id: `keep_${pixelX}_${pixelY}_${Date.now()}`, x: pixelX, y: pixelY };
+      return { ...prev, keptRegions: [...(prev.keptRegions || []), rule] };
+    });
+  }, []);
+
+  const handleUndoLastKeptRegion = useCallback(() => {
+    setParams((prev) => ({ ...prev, keptRegions: (prev.keptRegions || []).slice(0, -1) }));
+  }, []);
+
   const handleToggleMergeItemMode = useCallback(() => {
     setMergeItemMode((prev) => {
       const next = !prev;
       if (next) {
         setEyedropperTarget(null);
+        setKeepAreaMode(false);
       }
       return next;
     });
@@ -1172,6 +1206,7 @@ export default function App() {
                     setParams((p) => ({ ...p, boxPlateLayout: layout }))
                   }
                   boxLidLiftMm={params.boxLidLiftMm ?? 16}
+                  lidIsHinged={Boolean(params.boxMode) && resolveBoxLidStyle(params) === 'hinged'}
                   onChangeBoxLidLiftMm={(liftMm) =>
                     setParams((p) => ({ ...p, boxLidLiftMm: liftMm }))
                   }
@@ -1201,6 +1236,11 @@ export default function App() {
                   mergedRegionsCount={mergedRegionsCount}
                   onUndoLastMergedRegion={handleUndoLastMergedRegion}
                   onClearMergedRegions={handleClearMergedRegions}
+                  keepAreaMode={keepAreaMode}
+                  onToggleKeepAreaMode={handleToggleKeepAreaMode}
+                  onKeepAreaAtPixel={handleKeepAreaAtPixel}
+                  keptRegionsCount={params.keptRegions?.length || 0}
+                  onUndoLastKeptRegion={handleUndoLastKeptRegion}
                 />
               )}
 

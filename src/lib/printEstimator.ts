@@ -1,4 +1,5 @@
 import { ExtrudedModelResult, buildExtrudedModel } from './meshExtruder';
+import { renderSampleTraceImageData } from './imageLoader';
 import {
   MultiColorTraceResult,
   TraceParameters,
@@ -102,6 +103,12 @@ export function computePrintEstimate(
           ? 'Flush Lid'
           : params.boxLidStyle === 'raised_rim_recessed'
           ? 'Rim Lid'
+          : params.boxLidStyle === 'hinged'
+          ? 'Hinged Lid'
+          : params.boxLidStyle === 'sliding'
+          ? 'Sliding Lid'
+          : params.boxLidStyle === 'screw'
+          ? 'Screw-On Lid'
           : 'Cap & Plug Lid'
       }`
     : params.strokeEnabled
@@ -150,11 +157,28 @@ export function encodeImageDataToCompactDataUrl(
 }
 
 /**
+ * Stores the trace image for a submission at FULL trace resolution so staff reconstruct exactly the
+ * trace the patron saw (and clicked Merge / Keep Area points line up). Falls back to high-quality JPEG,
+ * then to downscaling, only if needed to stay well inside Firestore's 1 MB document limit.
+ */
+export function encodeImageDataForSubmission(imageData: ImageData, maxChars = 650_000): string {
+  const png = encodeImageDataToCompactDataUrl(imageData, Math.max(imageData.width, imageData.height));
+  if (png.length <= maxChars) return png;
+  const canvas = document.createElement('canvas');
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  canvas.getContext('2d')!.putImageData(imageData, 0, 0);
+  const jpeg = canvas.toDataURL('image/jpeg', 0.93);
+  if (jpeg.length <= maxChars) return jpeg;
+  return encodeImageDataToCompactDataUrl(imageData, 360);
+}
+
+/**
  * Reconstructs the source ImageData from a CustomizerConfig (either from built-in sampleId or compact DataURL).
  */
 export async function loadConfigImageData(
   config: CustomizerConfig,
-  maxTraceDim = 460
+  maxTraceDim = 640
 ): Promise<ImageData> {
   if (config.sourceImageDataUrl) {
     return new Promise<ImageData>((resolve, reject) => {
@@ -177,10 +201,7 @@ export async function loadConfigImageData(
 
   const sample =
     SAMPLE_ARTWORKS.find((s) => s.id === config.sampleId) || SAMPLE_ARTWORKS[0];
-  const canvas = document.createElement('canvas');
-  sample.renderToCanvas(canvas);
-  const ctx = canvas.getContext('2d')!;
-  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return renderSampleTraceImageData(sample);
 }
 
 /**

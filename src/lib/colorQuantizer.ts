@@ -22,6 +22,17 @@ export interface RemovedColorRule {
   enabled: boolean;
 }
 
+/**
+ * A background area the user clicked to KEEP (e.g. the white inside a giraffe's neck whose outline is
+ * open at the bottom, so automatic background removal floods into it). The tool finds the smallest
+ * gap-seal that encloses the clicked area and restores it as foreground.
+ */
+export interface KeptRegionRule {
+  id: string;
+  x: number; // Pixel X in sourceImageData
+  y: number; // Pixel Y in sourceImageData
+}
+
 export type MergeItemTargetMode = 'surrounding' | 'cutout' | number;
 
 export interface MergedRegionRule {
@@ -69,7 +80,13 @@ export type ExtrusionMode = 'backed_inlay' | 'full_flush' | 'stepped_relief';
 
 export type StrokeProfileStyle = 'flush_top_and_base' | 'raised_rim_and_base' | 'stepped_base_only';
 
-export type BoxLidStyle = 'flush_recessed' | 'raised_rim_recessed' | 'cap_with_plug';
+export type BoxLidStyle =
+  | 'flush_recessed'
+  | 'raised_rim_recessed'
+  | 'cap_with_plug'
+  | 'hinged' // Print-in-place hinge along the back (+Y) edge; lid and box print as one connected piece
+  | 'sliding' // Lid slides in from the front along grooves in the side and back walls (square / rectangle)
+  | 'screw'; // Threaded screw-on cap (circle boxes)
 
 export type BoxPlateLayout = 'assembled' | 'side_by_side';
 
@@ -84,6 +101,7 @@ export interface TraceParameters {
   customBgColor: RGB | null;
   removedColors: RemovedColorRule[];
   mergedRegions?: MergedRegionRule[];
+  keptRegions?: KeptRegionRule[]; // Background areas restored as artwork by clicking them ("Keep Area")
   despeckleLevel: number; // 0..3
   minIslandPx: number; // e.g. 20
   smoothEpsilon: number; // e.g. 1.0
@@ -105,6 +123,10 @@ export interface TraceParameters {
   boxHeightMm?: number; // Total Z height of the hollow box in millimeters (e.g. 28mm)
   boxLidStyle?: BoxLidStyle; // How the traced image lid seats into or onto the hollow stroke box
   boxLidToleranceMm?: number; // XY fit clearance between lid and box wall in millimeters (e.g. 0.20mm)
+  boxColorFollowsLid?: boolean; // Box body colour automatically matches the lid's outer edge (default true; picking a colour turns it off)
+  boxHingeClearanceMm?: number;
+  boxHingeSide?: 'back' | 'front' | 'left' | 'right' | 'auto'; // Which side of the box the hinge goes on (default back; auto = flattest edge) // Print-in-place hinge gap between pin, knuckles & neighbours (default 0.4mm)
+  boxLidGripTab?: boolean; // Adds a small finger-pull tab on the front edge of hinged / sliding lids (default true)
   boxLedgeWidthMm?: number; // Width of the internal support ledge inside the box wall in millimeters (e.g. 1.4mm)
   boxPlateLayout?: BoxPlateLayout; // 'assembled' (lid over box with lift) or 'side_by_side' (flat on Z=0 for printing)
   boxLidLiftMm?: number; // Vertical Z lift of the lid in 'assembled' preview mode (0..45mm)
@@ -119,6 +141,7 @@ export interface TraceParameters {
   baseThicknessMm: number; // e.g. 2.0mm
   inlayThicknessMm: number; // e.g. 0.8mm
   baseSlotIndex: number; // Which of the 4 colours acts as the full silhouette backing in 'backed_inlay'
+  baseSlotAuto?: boolean; // Auto-pick the backing / lid surround colour to match the picture's own background (default true)
   flipFaceDown?: boolean; // Face-down PEI bed orientation (non-base inlays at exactly Z = 0..inlayThicknessMm)
 }
 
@@ -571,7 +594,34 @@ function quantizeForegroundKMeans(
     }
   }
 
-  const sampleSource = interiorIndices.length > 50 ? interiorIndices : [];
+  // Prefer "flat" pixels (no sharp colour change to any neighbour) for learning the palette, so the
+  // blurry anti-aliased edge pixels between two inks (e.g. grey between blue and white) can't steal a
+  // colour slot from a real ink.
+  const flatIndices: number[] = [];
+  const FLAT_LIMIT = 34 * 34;
+  for (const idx of interiorIndices) {
+    const p = idx * 4;
+    let flat = true;
+    for (const n of [idx - 1, idx + 1, idx - width, idx + width, idx - width - 1, idx - width + 1, idx + width - 1, idx + width + 1]) {
+      if (n < 0 || n >= total) continue;
+      const q = n * 4;
+      const dr = smoothedData[p] - smoothedData[q];
+      const dg = smoothedData[p + 1] - smoothedData[q + 1];
+      const db = smoothedData[p + 2] - smoothedData[q + 2];
+      if (dr * dr + dg * dg + db * db > FLAT_LIMIT) {
+        flat = false;
+        break;
+      }
+    }
+    if (flat) flatIndices.push(idx);
+  }
+
+  const sampleSource =
+    flatIndices.length > Math.max(200, interiorIndices.length * 0.25)
+      ? flatIndices
+      : interiorIndices.length > 50
+      ? interiorIndices
+      : [];
   if (sampleSource.length === 0) {
     for (let i = 0; i < total; i++) {
       if (fgMask[i]) sampleSource.push(i);
@@ -630,12 +680,22 @@ function quantizeForegroundKMeans(
     centroids.push({ ...best });
   }
 
+  // Colours that occur in at least a few samples (ignores one-off noise pixels when seeding)
+  const seedBucketCounts = new Map<number, number>();
+  const bucketOf = (s: RGB) => ((s.r >> 3) << 10) | ((s.g >> 3) << 5) | (s.b >> 3);
+  for (const s of samples) {
+    const key = bucketOf(s);
+    seedBucketCounts.set(key, (seedBucketCounts.get(key) || 0) + 1);
+  }
+  const minSeedSupport = samples.length > 400 ? 3 : 1;
+
   while (centroids.length < k) {
     let bestCandidate = samples[0];
     let maxScore = -1;
 
     for (let i = 0; i < samples.length; i++) {
       const s = samples[i];
+      if ((seedBucketCounts.get(bucketOf(s)) || 0) < minSeedSupport) continue;
       let minDist = Infinity;
       for (const c of centroids) {
         const d = colorDistSq(s, c);
@@ -925,6 +985,105 @@ function healInteriorBackgroundGaps(
         fgMask[compIndices[j]] = 1;
       }
     }
+  }
+}
+
+/**
+ * "Keep Area": restores clicked background regions as foreground. Background removal floods into any
+ * area whose outline is open (a neck drawn without a bottom line, a letter C, a cup handle...).
+ * From the click we flood only through background pixels that are BRACKETED by artwork on both sides
+ * (left & right, or above & below) within a width limit taken from the clicked spot. Inside an open
+ * tube every row is bracketed by its two walls; past the end of the walls nothing is, so the fill
+ * stops exactly at the open end, sealing it in a straight line.
+ */
+function applyKeptRegions(
+  fgMask: Uint8Array,
+  width: number,
+  height: number,
+  regions: KeptRegionRule[] | undefined
+): void {
+  if (!regions || regions.length === 0) return;
+  const total = width * height;
+  const INF = 1 << 29;
+  const left = new Int32Array(total);
+  const right = new Int32Array(total);
+  const up = new Int32Array(total);
+  const down = new Int32Array(total);
+  const queue = new Int32Array(total);
+  const inFill = new Uint8Array(total);
+
+  const computeReach = () => {
+    for (let y = 0; y < height; y++) {
+      let d = INF;
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        d = fgMask[i] ? 0 : d >= INF ? INF : d + 1;
+        left[i] = d;
+      }
+      d = INF;
+      for (let x = width - 1; x >= 0; x--) {
+        const i = y * width + x;
+        d = fgMask[i] ? 0 : d >= INF ? INF : d + 1;
+        right[i] = d;
+      }
+    }
+    for (let x = 0; x < width; x++) {
+      let d = INF;
+      for (let y = 0; y < height; y++) {
+        const i = y * width + x;
+        d = fgMask[i] ? 0 : d >= INF ? INF : d + 1;
+        up[i] = d;
+      }
+      d = INF;
+      for (let y = height - 1; y >= 0; y--) {
+        const i = y * width + x;
+        d = fgMask[i] ? 0 : d >= INF ? INF : d + 1;
+        down[i] = d;
+      }
+    }
+  };
+
+  for (const rule of regions) {
+    const sx = Math.max(0, Math.min(width - 1, Math.round(rule.x)));
+    const sy = Math.max(0, Math.min(height - 1, Math.round(rule.y)));
+    const seed = sy * width + sx;
+    if (fgMask[seed]) continue; // already artwork
+
+    computeReach();
+    const spanH = left[seed] + right[seed];
+    const spanV = up[seed] + down[seed];
+    const sMin = Math.min(spanH, spanV);
+    if (sMin >= INF) continue; // not bracketed at all: genuinely open background
+    const limit = sMin * 1.8 + 6;
+    const bracketed = (i: number) => left[i] + right[i] <= limit || up[i] + down[i] <= limit;
+
+    let bgCount = 0;
+    for (let i = 0; i < total; i++) if (!fgMask[i]) bgCount++;
+
+    inFill.fill(0);
+    let head = 0;
+    let tail = 0;
+    let touchesBorder = false;
+    inFill[seed] = 1;
+    queue[tail++] = seed;
+    while (head < tail) {
+      const cur = queue[head++];
+      const cx = cur % width;
+      const cy = (cur - cx) / width;
+      if (cx === 0 || cy === 0 || cx === width - 1 || cy === height - 1) touchesBorder = true;
+      const visit = (n: number) => {
+        if (inFill[n] || fgMask[n] || !bracketed(n)) return;
+        inFill[n] = 1;
+        queue[tail++] = n;
+      };
+      if (cx > 0) visit(cur - 1);
+      if (cx < width - 1) visit(cur + 1);
+      if (cy > 0) visit(cur - width);
+      if (cy < height - 1) visit(cur + width);
+    }
+    // Safety: never swallow the real outside background
+    if (touchesBorder || tail > bgCount * 0.5) continue;
+    for (let q = 0; q < tail; q++) fgMask[queue[q]] = 1;
   }
 }
 
@@ -1367,6 +1526,9 @@ export function runMultiColorTracePipeline(
     params.removedColors
   );
 
+  // Restore any background areas the user clicked to keep (sealing open gaps automatically)
+  applyKeptRegions(fgMask, width, height, params.keptRegions);
+
   // If closeColorGaps is enabled, heal internal anti-aliased transition cracks between colours
   if (params.closeColorGaps) {
     healInteriorBackgroundGaps(
@@ -1491,6 +1653,9 @@ export function runMultiColorTracePipeline(
 
   let computedStrokeRadiusPx = 0;
   let computedPxPerMm = 1;
+  // Extra shrink applied to the artwork when a geometric frame cannot fit the canvas at the size the
+  // logo needs (e.g. a tall logo in a wide rectangle): the logo is drawn smaller so it stays inside the lid.
+  let geomFitShrink = 1;
   let innerDeepCavityMask: Uint8Array | undefined = undefined;
   let resolvedMergedRegions: ResolvedMergedRegion[] = [];
   let artworkOnlyLabels: Int8Array | null = null;
@@ -1664,6 +1829,9 @@ export function runMultiColorTracePipeline(
         );
 
         computedPxPerMm = Math.min(maxPxPerMmForOuter, Math.max(minPxPerMmForLogo, 0.4));
+        if (computedPxPerMm < minPxPerMmForLogo - 1e-6) {
+          geomFitShrink = computedPxPerMm / minPxPerMmForLogo;
+        }
 
         wallPx = Math.max(2.0, wallMm * computedPxPerMm);
         ledgePx = Math.max(1.6, ledgeMm * computedPxPerMm);
@@ -1727,7 +1895,7 @@ export function runMultiColorTracePipeline(
 
       // Logo Scaling on Geometric Lids (Square, Circle, Rectangle)
       const rawLogoScale = (params.logoScalePercent ?? 100) / 100;
-      const logoScale = Math.max(0.15, Math.min(1.5, rawLogoScale));
+      const logoScale = Math.max(0.15, Math.min(1.5, rawLogoScale)) * geomFitShrink;
 
       const approxOuterBoxWidthMm = Math.max(15, params.targetWidthMm);
       const pxPerMmApprox = (outerHalfW * 2) / approxOuterBoxWidthMm;
@@ -2050,7 +2218,7 @@ export function runMultiColorTracePipeline(
   let finalCombinedStrokePolygons = planarTrace.combinedStrokePolygons;
 
   const rawLogoScale = (params.logoScalePercent ?? 100) / 100;
-  const logoScale = Math.max(0.15, Math.min(1.5, rawLogoScale));
+  const logoScale = Math.max(0.15, Math.min(1.5, rawLogoScale)) * geomFitShrink;
 
   const scalePolys = (polys: TracedPolygon[]): TracedPolygon[] => {
     if (!isGeometricShape || Math.abs(logoScale - 1.0) < 1e-4) return polys;

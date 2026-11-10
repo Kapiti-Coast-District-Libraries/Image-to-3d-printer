@@ -10,6 +10,7 @@ import {
   MousePointerClick,
   Undo2,
   X,
+  PaintBucket,
 } from 'lucide-react';
 
 export type InspectorSubMode = 'vector_paths' | 'quantized_flat' | 'side_by_side';
@@ -31,6 +32,11 @@ interface VectorInspector2DProps {
   mergedRegionsCount?: number;
   onUndoLastMergedRegion?: () => void;
   onClearMergedRegions?: () => void;
+  keepAreaMode?: boolean;
+  onToggleKeepAreaMode?: () => void;
+  onKeepAreaAtPixel?: (pixelX: number, pixelY: number) => void;
+  keptRegionsCount?: number;
+  onUndoLastKeptRegion?: () => void;
 }
 
 export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
@@ -48,6 +54,11 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
   mergedRegionsCount = 0,
   onUndoLastMergedRegion,
   onClearMergedRegions,
+  keepAreaMode = false,
+  onToggleKeepAreaMode,
+  onKeepAreaAtPixel,
+  keptRegionsCount = 0,
+  onUndoLastKeptRegion,
 }) => {
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const quantizedCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -109,6 +120,11 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
   const handleElementClick = (clientX: number, clientY: number, el: Element) => {
     const coords = getPixelCoordsFromElement(clientX, clientY, el);
     if (!coords || !sourceImageData) return;
+
+    if (keepAreaMode && onKeepAreaAtPixel) {
+      onKeepAreaAtPixel(coords.x, coords.y);
+      return;
+    }
 
     if (mergeItemMode && onMergeItemAtPixel) {
       onMergeItemAtPixel(coords.x, coords.y);
@@ -211,6 +227,40 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
         </div>
       )}
 
+      {/* Keep Area Active Banner */}
+      {keepAreaMode && (
+        <div className="border-b border-amber-500/40 bg-amber-500/15 px-4 py-2.5 flex items-center justify-between gap-3 text-xs text-amber-100">
+          <div className="flex items-center gap-2">
+            <PaintBucket className="w-4 h-4 text-amber-300 animate-pulse" />
+            <span className="font-medium">
+              Keep Area: click a spot that was wrongly removed as background (e.g. inside an outline that
+              is open at one end) to fill it back in
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {keptRegionsCount > 0 && onUndoLastKeptRegion && (
+              <button
+                type="button"
+                onClick={onUndoLastKeptRegion}
+                className="flex items-center gap-1 px-2.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-medium cursor-pointer"
+              >
+                <Undo2 className="w-3 h-3" />
+                <span>Undo Last ({keptRegionsCount})</span>
+              </button>
+            )}
+            {onToggleKeepAreaMode && (
+              <button
+                type="button"
+                onClick={onToggleKeepAreaMode}
+                className="px-2.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-semibold cursor-pointer"
+              >
+                Done
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Eyedropper / Colour Removal Active Banner */}
       {!mergeItemMode && eyedropperTarget !== null && (
         <div
@@ -263,6 +313,8 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
                   className={`max-h-[460px] w-auto object-contain rounded ${
                     mergeItemMode
                       ? 'cursor-crosshair ring-2 ring-cyan-400'
+                      : keepAreaMode
+                      ? 'cursor-crosshair ring-2 ring-amber-400'
                       : eyedropperTarget !== null
                       ? eyedropperTarget === 'remove_color'
                         ? 'cursor-crosshair ring-2 ring-rose-400'
@@ -297,7 +349,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
                   }`}
                   style={{ aspectRatio: `${traceResult.width} / ${traceResult.height}` }}
                   onClick={(e) => {
-                    if (mergeItemMode || eyedropperTarget !== null) {
+                    if (mergeItemMode || keepAreaMode || eyedropperTarget !== null) {
                       handleElementClick(e.clientX, e.clientY, e.currentTarget);
                     }
                   }}
@@ -327,8 +379,8 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
                           mergeItemMode ? 'cursor-crosshair' : 'cursor-pointer'
                         }`}
                         onClick={(e) => {
-                          if (mergeItemMode) {
-                            // Let click bubble up to the <svg> handler to merge at exact pixel coordinate
+                          if (mergeItemMode || keepAreaMode) {
+                            // Let click bubble up to the <svg> handler to act at the exact pixel coordinate
                             return;
                           }
                           if (eyedropperTarget === null && onToggleSlotEnabled) {
@@ -369,7 +421,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
                 onClick={(e) => handleElementClick(e.clientX, e.clientY, e.currentTarget)}
                 style={{ transform: `scale(${zoom})`, transformOrigin: 'center center' }}
                 className={`max-h-[540px] w-auto object-contain transition-transform duration-150 ${
-                  mergeItemMode ? 'cursor-crosshair ring-2 ring-cyan-400 rounded' : ''
+                  mergeItemMode ? 'cursor-crosshair ring-2 ring-cyan-400 rounded' : keepAreaMode ? 'cursor-crosshair ring-2 ring-amber-400 rounded' : ''
                 }`}
               />
             </div>
@@ -381,7 +433,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
               <svg
                 viewBox={`0 0 ${traceResult.width} ${traceResult.height}`}
                 className={`h-[540px] w-auto transition-transform duration-150 ${
-                  mergeItemMode ? 'cursor-crosshair ring-2 ring-cyan-400 rounded' : ''
+                  mergeItemMode ? 'cursor-crosshair ring-2 ring-cyan-400 rounded' : keepAreaMode ? 'cursor-crosshair ring-2 ring-amber-400 rounded' : ''
                 }`}
                 style={{
                   transform: `scale(${zoom})`,
@@ -389,7 +441,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
                   aspectRatio: `${traceResult.width} / ${traceResult.height}`,
                 }}
                 onClick={(e) => {
-                  if (mergeItemMode) {
+                  if (mergeItemMode || keepAreaMode) {
                     handleElementClick(e.clientX, e.clientY, e.currentTarget);
                   }
                 }}
@@ -418,7 +470,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
                           mergeItemMode ? 'cursor-crosshair' : 'cursor-pointer'
                         }`}
                         onClick={() => {
-                          if (mergeItemMode) return;
+                          if (mergeItemMode || keepAreaMode) return;
                           if (onToggleSlotEnabled) onToggleSlotEnabled(layer.slotIndex);
                         }}
                       >
@@ -484,6 +536,26 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
         </div>
 
         <div className="pointer-events-auto flex items-center gap-2 bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-lg px-3 py-1.5">
+          {onToggleKeepAreaMode && (
+            <button
+              type="button"
+              onClick={onToggleKeepAreaMode}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                keepAreaMode
+                  ? 'bg-amber-500/25 text-amber-200 border border-amber-400/60 ring-1 ring-amber-400/40'
+                  : 'text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/25'
+              }`}
+              title="Click an area that was wrongly removed as background to fill it back in"
+            >
+              <PaintBucket className="w-3.5 h-3.5" />
+              <span>
+                {keepAreaMode
+                  ? 'Keeping Areas (Click)...'
+                  : `Keep Area${keptRegionsCount ? ` (${keptRegionsCount})` : ''}`}
+              </span>
+            </button>
+          )}
+
           {onToggleMergeItemMode && (
             <>
               <button

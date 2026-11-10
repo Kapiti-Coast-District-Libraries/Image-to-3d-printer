@@ -32,6 +32,7 @@ interface Viewport3DProps {
   onChangeBoxPlateLayout?: (layout: BoxPlateLayout) => void;
   boxLidLiftMm?: number;
   onChangeBoxLidLiftMm?: (liftMm: number) => void;
+  lidIsHinged?: boolean; // The lift slider swings a hinged lid open instead of lifting it
   boxDividersEnabled?: boolean;
   boxDividerCols?: number;
   boxDividerRows?: number;
@@ -54,6 +55,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   onChangeBoxPlateLayout,
   boxLidLiftMm = 16,
   onChangeBoxLidLiftMm,
+  lidIsHinged = false,
   boxDividersEnabled = false,
   boxDividerCols = 2,
   boxDividerRows = 2,
@@ -513,7 +515,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           {boxPlateLayout === 'assembled' && onChangeBoxLidLiftMm && (
             <div className="flex items-center gap-2 pl-1 border-l border-white/10">
               <span className="text-[11px] text-slate-300 whitespace-nowrap">
-                {boxLidLiftMm === 0 ? 'Lid Closed' : `Lid Lift +${boxLidLiftMm}mm`}
+                {boxLidLiftMm === 0
+                  ? 'Lid Closed'
+                  : lidIsHinged
+                  ? `Lid Open ${Math.round((Math.min(45, boxLidLiftMm) / 45) * 180)}°`
+                  : `Lid Lift +${boxLidLiftMm}mm`}
               </span>
               <input
                 type="range"

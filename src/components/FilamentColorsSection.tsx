@@ -448,6 +448,7 @@ export const FilamentColorsSection: React.FC<FilamentColorsSectionProps> = ({
                                 setParams((p) => ({
                                   ...p,
                                   strokeColorHex: bambuMatch.preset.hex,
+                                  boxColorFollowsLid: false,
                                 }));
                               } else {
                                 setSlotConfigs((prev) =>
@@ -490,7 +491,7 @@ export const FilamentColorsSection: React.FC<FilamentColorsSectionProps> = ({
                           onChange={(e) => {
                             const newHex = e.target.value.toUpperCase();
                             if (layer.isStrokeAndBase && layer.slotIndex === 4) {
-                              setParams((p) => ({ ...p, strokeColorHex: newHex }));
+                              setParams((p) => ({ ...p, strokeColorHex: newHex, boxColorFollowsLid: false }));
                             } else {
                               setSlotConfigs((prev) =>
                                 prev.map((s, idx) =>
@@ -516,7 +517,7 @@ export const FilamentColorsSection: React.FC<FilamentColorsSectionProps> = ({
                             type="button"
                             onClick={() => {
                               if (layer.isStrokeAndBase && layer.slotIndex === 4) {
-                                setParams((p) => ({ ...p, strokeColorHex: sw.hex }));
+                                setParams((p) => ({ ...p, strokeColorHex: sw.hex, boxColorFollowsLid: false }));
                               } else {
                                 setSlotConfigs((prev) =>
                                   prev.map((s, idx) =>

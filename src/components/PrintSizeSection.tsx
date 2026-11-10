@@ -171,31 +171,6 @@ export const PrintSizeSection: React.FC<PrintSizeSectionProps> = ({
             </span>
           </div>
         )}
-
-        {/* Quick Preset Buttons */}
-        <div className="grid grid-cols-5 gap-1 pt-1">
-          {[
-            { label: '50mm', tip: 'Keychain', val: 50 },
-            { label: '80mm', tip: 'Coaster', val: 80 },
-            { label: '95mm', tip: 'Default', val: 95 },
-            { label: '140mm', tip: 'Desk Sign', val: 140 },
-            { label: '200mm', tip: 'Large', val: 200 },
-          ].map((preset) => (
-            <button
-              key={preset.val}
-              type="button"
-              onClick={() => setParams((p) => ({ ...p, targetWidthMm: preset.val }))}
-              className={`py-1 px-1 rounded-lg text-[10px] font-semibold border transition-all cursor-pointer text-center truncate ${
-                params.targetWidthMm === preset.val
-                  ? 'bg-blue-50 text-blue-700 border-blue-300 ring-1 ring-blue-400 font-bold'
-                  : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
-              }`}
-              title={preset.tip}
-            >
-              {preset.label}
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* 2. Base Plate Thickness */}
@@ -227,27 +202,15 @@ export const PrintSizeSection: React.FC<PrintSizeSectionProps> = ({
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-1.5">
-          {[
-            { label: '1.2 mm', val: 1.2 },
-            { label: '1.6 mm', val: 1.6 },
-            { label: '2.0 mm', val: 2.0 },
-            { label: '2.4 mm', val: 2.4 },
-          ].map(({ label, val }) => (
-            <button
-              key={val}
-              type="button"
-              onClick={() => setParams((p) => ({ ...p, baseThicknessMm: val }))}
-              className={`py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                Math.abs(params.baseThicknessMm - val) < 0.05
-                  ? 'bg-blue-50 text-blue-700 border-blue-200 font-bold'
-                  : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <input
+          type="range"
+          min={0.8}
+          max={6}
+          step={0.2}
+          value={params.baseThicknessMm}
+          onChange={(e) => setParams((p) => ({ ...p, baseThicknessMm: parseFloat(e.target.value) }))}
+          className="w-full accent-blue-600 cursor-pointer"
+        />
       </div>
 
       {/* Summary Card: Total Dimensions */}
