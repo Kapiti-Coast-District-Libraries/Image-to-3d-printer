@@ -1332,6 +1332,21 @@ export function buildExtrudedModel(
       }
     }
 
+    // A lid is exported face-down by flipping every part around the SAME plane. Give all (non pre-flipped)
+    // lid parts the lid's overall height range, so hinge knuckles, plugs or skirts carried by the backing
+    // colour can't shift the flip plane for the inlay colours (which would leave them floating mid-lid).
+    {
+      const lidParts = parts.filter((p) => p.partGroup === 'lid' && !p.isPreFlippedFaceDown);
+      if (lidParts.length > 0) {
+        const zLo = Math.min(...lidParts.map((p) => Math.min(p.zMin, p.lidZMin ?? p.zMin)));
+        const zHi = Math.max(...lidParts.map((p) => Math.max(p.zMax, p.lidZMax ?? p.zMax)));
+        for (const p of lidParts) {
+          p.lidZMin = zLo;
+          p.lidZMax = zHi;
+        }
+      }
+    }
+
     let totalVertices = 0;
     let totalTriangles = 0;
     for (const part of parts) {
