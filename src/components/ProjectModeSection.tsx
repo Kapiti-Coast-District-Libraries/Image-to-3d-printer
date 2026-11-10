@@ -89,12 +89,15 @@ interface ProjectModeSectionProps {
   params: TraceParameters;
   setParams: React.Dispatch<React.SetStateAction<TraceParameters>>;
   traceResult: MultiColorTraceResult | null;
+  /** Two-piece hinged box: filament pin length(s) to cut */
+  hingePinLengthsMm?: number[];
 }
 
 export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
   params,
   setParams,
   traceResult,
+  hingePinLengthsMm,
 }) => {
   return (
     <section className="space-y-3.5 bg-slate-50/80 border border-slate-200/90 rounded-2xl p-4 shadow-2xs">
@@ -911,6 +914,46 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                 <>
                 {resolved === 'hinged' && (
                   <div className="space-y-1 pt-1">
+                    <span className="text-[11px] font-medium text-slate-600 block">Lid Shape</span>
+                    <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                      {(
+                        [
+                          ['clamshell', 'Clamshell'],
+                          ['flat_pin', 'Flat + pin'],
+                          ['flat', 'Flat (in place)'],
+                        ] as [NonNullable<TraceParameters['boxHingeLidMode']>, string][]
+                      ).map(([m, label]) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() =>
+                            setParams((p) => ({ ...p, boxHingeLidMode: m, boxHingeClamshell: m === 'clamshell' }))
+                          }
+                          className={`px-1 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer truncate ${
+                            (params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell')) === m
+                              ? 'bg-white text-teal-800 shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-snug">
+                      {(params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell')) === 'clamshell'
+                        ? 'Box and lid are each half the height and print already hinged. The hinge sits right at the rim with short, strong arms.'
+                        : (params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell')) === 'flat_pin'
+                        ? `Flat lid printed as a separate piece with a short, strong hinge at the rim. Push a 1.75 mm filament offcut through the knuckles from the outer end to join them${
+                            hingePinLengthsMm && hingePinLengthsMm.length
+                              ? ` (cut ${hingePinLengthsMm.length === 1 ? 'one piece' : `${hingePinLengthsMm.length} pieces`} about ${Math.round(Math.max(...hingePinLengthsMm))} mm long)`
+                              : ''
+                          }.`
+                        : 'A flat lid printed already hinged to a full-height box. Hinge arms get longer as the box gets taller.'}
+                    </p>
+                  </div>
+                )}
+                {resolved === 'hinged' && (
+                  <div className="space-y-1 pt-1">
                     <span className="text-[11px] font-medium text-slate-600 block">Hinge Side</span>
                     <div className="grid grid-cols-5 gap-1 bg-slate-100 p-1 rounded-xl">
                       {(
@@ -1074,7 +1117,7 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
           {/* Parts to Export (not offered for hinged boxes: box and lid are joined) */}
           <div
             className={`space-y-1 pt-1 border-t border-slate-200/80 ${
-              resolveBoxLidStyle(params) === 'hinged' ? 'hidden' : ''
+              resolveBoxLidStyle(params) === 'hinged' && (params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell')) !== 'flat_pin' ? 'hidden' : ''
             }`}
           >
             <span className="text-[11px] font-medium text-slate-600 block">

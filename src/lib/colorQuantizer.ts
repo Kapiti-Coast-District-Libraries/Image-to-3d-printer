@@ -125,6 +125,8 @@ export interface TraceParameters {
   boxLidToleranceMm?: number; // XY fit clearance between lid and box wall in millimeters (e.g. 0.20mm)
   boxColorFollowsLid?: boolean; // Box body colour automatically matches the lid's outer edge (default true; picking a colour turns it off)
   boxHingeClearanceMm?: number;
+  boxHingeLidMode?: 'clamshell' | 'flat_pin' | 'flat'; // Hinged lid shape (default clamshell)
+  boxHingeClamshell?: boolean; // Hinged box splits into equal box and lid halves (default true): short, strong hinge arms at any height
   boxHingeSide?: 'back' | 'front' | 'left' | 'right' | 'auto'; // Which side of the box the hinge goes on (default back; auto = flattest edge) // Print-in-place hinge gap between pin, knuckles & neighbours (default 0.4mm)
   boxLidGripTab?: boolean; // Adds a small finger-pull tab on the front edge of hinged / sliding lids (default true)
   boxLedgeWidthMm?: number; // Width of the internal support ledge inside the box wall in millimeters (e.g. 1.4mm)

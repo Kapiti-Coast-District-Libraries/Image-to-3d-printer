@@ -1059,6 +1059,7 @@ export default function App() {
               params={params}
               setParams={setParams}
               traceResult={traceResult}
+              hingePinLengthsMm={extrudedModel?.hingePinLengthsMm}
             />
 
             {/* 02. Source Artwork */}

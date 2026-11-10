@@ -136,6 +136,8 @@ export interface ExtrudedModelResult {
   };
   totalVertices: number;
   totalTriangles: number;
+  /** Two-piece hinged box: filament pin length to cut for each hinge (mm) */
+  hingePinLengthsMm?: number[];
 }
 
 function cleanRing2D(ring: Point[]): THREE.Vector2[] {
@@ -583,11 +585,27 @@ export function buildExtrudedModel(
     if (lidStyle === 'sliding') minBoxHeightMm += SLIDE_TONGUE_MM + 1.0;
     if (lidStyle === 'screw') minBoxHeightMm = Math.max(minBoxHeightMm, floorThicknessMm + SCREW_NECK_HEIGHT_MM + 5);
     if (lidStyle === 'hinged') minBoxHeightMm = Math.max(minBoxHeightMm, 12);
+    // Clamshell hinged box: the closed height (walls + lid plate) is split into two equal halves, a box
+    // half and a lid half with its own walls, so the hinge pin sits right at the rim between them.
+    // Hinged lid shape: clamshell (deep lid, print-in-place), flat lid joined by a filament pin (two
+    // pieces), or flat lid printed in place (long arms)
+    const hingeLidMode =
+      params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell');
+    const clamshell = lidStyle === 'hinged' && hingeLidMode === 'clamshell';
+    const pinHinge = lidStyle === 'hinged' && hingeLidMode === 'flat_pin';
+    if (clamshell) {
+      minBoxHeightMm = Math.max(minBoxHeightMm, 2 * (floorThicknessMm + 4) - lidTotalThicknessMm, 2 * (lidTotalThicknessMm + 3) - lidTotalThicknessMm);
+    }
     const boxHeightMm = Math.max(minBoxHeightMm, params.boxHeightMm ?? 28.0);
+    /** Depth of each half (box half and lid half) of a clamshell hinged box */
+    const clamshellHalfMm = (boxHeightMm + lidTotalThicknessMm) / 2;
+    // Rim clearance for hinged lids: grows with the hinge gap (a looser pin lets the lid sag further)
+    // Closed lids sit flush on the rim; the lid knuckles' slotted holes absorb any print variation
+    const hingeRimGapMm = 0;
     const toleranceMm = Math.max(0, params.boxLidToleranceMm ?? 0.2);
     const plateLayout = params.boxPlateLayout || 'assembled';
     // A print-in-place hinge joins box & lid, so they can't be exported separately
-    const exportParts = lidStyle === 'hinged' ? 'both' : params.boxExportParts || 'both';
+    const exportParts = lidStyle === 'hinged' && !pinHinge ? 'both' : params.boxExportParts || 'both';
     const lidLiftMm =
       plateLayout === 'assembled' ? Math.max(0, params.boxLidLiftMm ?? 16.0) : 0;
 
@@ -661,7 +679,7 @@ export function buildExtrudedModel(
     );
     const outerCornerMm = innerCornerMm > 0 ? innerCornerMm + measuredWall : 0;
 
-    if (plateLayout === 'side_by_side' && exportParts === 'both' && lidStyle !== 'hinged') {
+    if (plateLayout === 'side_by_side' && exportParts === 'both' && (lidStyle !== 'hinged' || pinHinge)) {
       const gapMm = 8;
       boxOffsetX = -(approxLidWidthMm + gapMm) * 0.5;
       lidOffsetX = (boxWidthMm + gapMm) * 0.5;
@@ -674,12 +692,22 @@ export function buildExtrudedModel(
     if (lidStyle === 'hinged') {
       hinge = buildPrintInPlaceHinge({
         outerRing: outerRingMm,
-        boxHeight: boxHeightMm,
-        lidThickness: lidTotalThicknessMm,
+        boxHeight: clamshell ? clamshellHalfMm : boxHeightMm,
+        lidThickness: clamshell ? clamshellHalfMm : lidTotalThicknessMm,
+        clamshell,
         wall: measuredWall,
         clearance: params.boxHingeClearanceMm ?? 0.4,
+        rimGap: hingeRimGapMm,
+        pin: pinHinge,
         gripTab: params.boxLidGripTab !== false,
         side: params.boxHingeSide ?? 'back',
+        // Wall outline lets the hinge add strengthening gussets to the lid knuckles and cut matching slots
+        wallPolys: clamshell || pinHinge
+          ? undefined
+          : upperWallsForMeasure.map((poly) => ({
+          outer: poly.outer.map(transformPt),
+          holes: poly.holes.map((h) => h.map(transformPt)),
+        })),
       });
     } else if (lidStyle === 'sliding') {
       sliding = buildSlidingLid({
@@ -716,8 +744,13 @@ export function buildExtrudedModel(
         ? Math.PI
         : Math.min(Math.PI, (Math.max(0, params.boxLidLiftMm ?? 16) / 45) * Math.PI);
 
-    if (lidStyle === 'hinged') {
-      lidZBase = boxHeightMm;
+    // Two-piece lid on the plate: lying flat on its own, lowest point (the knuckles) at Z = 0
+    const pinLidOnPlate =
+      pinHinge && ((plateLayout === 'side_by_side' && exportParts === 'both') || exportParts === 'lid_only');
+    if (pinLidOnPlate && hinge) {
+      lidZBase = hinge.lidHangBelowRim;
+    } else if (lidStyle === 'hinged') {
+      lidZBase = boxHeightMm + hingeRimGapMm; // closed lid sits on the rim
     } else if (
       (plateLayout === 'side_by_side' && exportParts === 'both') ||
       exportParts === 'lid_only'
@@ -793,10 +826,21 @@ export function buildExtrudedModel(
           mapVertices(screw.boxWalls, (v) => ({ x: v.x + boxOffsetX, y: v.y, z: v.z }))
         );
       } else if (lidStyle === 'hinged') {
-        // Full-height plain walls; the lid sits on top of the rim
+        // Plain walls; the lid sits on top of the rim. With gusseted lid knuckles the top band of the
+        // wall comes from the hinge, with 45-degree slots the gussets nest into when the lid closes.
+        const plainWallTop = clamshell
+          ? clamshellHalfMm
+          : hinge?.wallTopMesh
+          ? hinge.wallSplitZ
+          : boxHeightMm;
         appendBoxMesh(
-          extrudePolygonsToManifold(upperWalls, transformBoxPt, floorThicknessMm, boxHeightMm, 0, 0, 0)
+          extrudePolygonsToManifold(upperWalls, transformBoxPt, floorThicknessMm, plainWallTop, 0, 0, 0)
         );
+        if (hinge?.wallTopMesh) {
+          appendBoxMesh(
+            mapVertices(hinge.wallTopMesh, (v) => ({ x: v.x + boxOffsetX, y: v.y, z: v.z }))
+          );
+        }
         if (hinge) {
           appendBoxMesh(
             mapVertices(hinge.bodyMesh, (v) => ({ x: v.x + boxOffsetX, y: v.y, z: v.z }))
@@ -858,7 +902,11 @@ export function buildExtrudedModel(
             lidStyle === 'cap_with_plug'
               ? boxHeightMm - plugDepthMm - 0.2
               : lidStyle === 'hinged'
-              ? boxHeightMm - 0.3
+              ? clamshell
+                ? clamshellHalfMm - 0.3
+                : hinge?.wallTopMesh
+                ? hinge.wallSplitZ - 0.2
+                : boxHeightMm - 0.3
               : sliding
               ? sliding.grooveBottomZ - 0.2
               : screw
@@ -1012,7 +1060,7 @@ export function buildExtrudedModel(
           name: `Hollow_Box_${strokeHex.replace('#', '')}`,
           colorHex: strokeHex,
           partGroup: 'box',
-          printInPlaceLinked: lidStyle === 'hinged' ? true : undefined,
+          printInPlaceLinked: lidStyle === 'hinged' && !pinHinge ? true : undefined,
           offsetX: boxOffsetX,
           lidZMin: 0,
           lidZMax: boxHeightMm,
@@ -1085,11 +1133,33 @@ export function buildExtrudedModel(
       };
       if (lidStyle === 'hinged') {
         if (hinge) {
-          appendInto(lidExtras, hinge.lidMeshClosed);
+          // Knuckles were built for the closed lid; move them with a separately placed two-piece lid
+          const dzLid = lidZBase - (boxHeightMm + hingeRimGapMm);
+          appendInto(
+            lidExtras,
+            dzLid !== 0 || lidOffsetX !== 0
+              ? mapVertices(hinge.lidMeshClosed, (v) => ({ x: v.x + lidOffsetX, y: v.y, z: v.z + dzLid }))
+              : hinge.lidMeshClosed
+          );
+          // Clamshell lid half: its own walls from the rim up to the underside of the art plate
+          if (clamshell) {
+            appendInto(
+              lidExtras,
+              extrudePolygonsToManifold(upperWallsForMeasure, transformPt, clamshellHalfMm + hingeRimGapMm, lidZBase + 0.05, 0, 0, 0)
+            );
+          }
           // Tab sits opposite the hinge, which may follow an angled edge on contour boxes
           if (gripTab && hinge.gripTabPts) {
             const tabT = Math.min(1.6, lidTotalThicknessMm);
-            appendInto(lidExtras, extrudePoly2D(hinge.gripTabPts, [], topZ - tabT, topZ));
+            appendInto(
+              lidExtras,
+              extrudePoly2D(
+                hinge.gripTabPts.map((p) => ({ x: p.x + lidOffsetX, y: p.y })),
+                [],
+                topZ - tabT,
+                topZ
+              )
+            );
           }
         }
       } else if (sliding) {
@@ -1230,13 +1300,14 @@ export function buildExtrudedModel(
           partZMax = Math.max(partZMax, eb.maxZ);
         }
         let preFlipped = false;
-        if (lidStyle === 'hinged' && hinge && partMesh.vertices.length > 0) {
+        if (lidStyle === 'hinged' && hinge && partMesh.vertices.length > 0 && !pinLidOnPlate) {
           // Swing the closed lid open about the hinge axis (180 degrees = face-down print layout)
           partMesh = rotateAboutAxis(partMesh, hinge.axisPoint, hinge.axisDir, hingeOpenAngle);
           const rb = meshBounds(partMesh);
           partZMin = rb.minZ;
           partZMax = rb.maxZ;
-          preFlipped = true; // exporters must not apply their own face-down flip
+          // Print-in-place lids are already face-down; a two-piece lid preview is just for show
+          preFlipped = !pinHinge;
         }
 
         if (partMesh.vertices.length > 0 && partMesh.triangles.length > 0) {
@@ -1250,7 +1321,7 @@ export function buildExtrudedModel(
             lidZMin: preFlipped ? partZMin : Math.min(lidOverallZMin, partZMin),
             lidZMax: preFlipped ? partZMax : Math.max(lidOverallZMax, partZMax),
             isPreFlippedFaceDown: preFlipped,
-            printInPlaceLinked: lidStyle === 'hinged' ? true : undefined,
+            printInPlaceLinked: lidStyle === 'hinged' && !pinHinge ? true : undefined,
             vertices: partMesh.vertices,
             triangles: partMesh.triangles,
             zMin: partZMin,
@@ -1312,6 +1383,7 @@ export function buildExtrudedModel(
       },
       totalVertices,
       totalTriangles,
+      hingePinLengthsMm: pinHinge && hinge ? hinge.pinLengthsMm : undefined,
     };
   }
 

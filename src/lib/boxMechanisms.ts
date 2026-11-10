@@ -644,6 +644,106 @@ export interface HingeResult {
   axisDir: V3; // unit direction of the hinge axis
   gripTabPts: P2[] | null; // finger-pull tab outline on the front edge, opposite the hinge
   groupCount: number;
+  /** Top band of the box walls (wallSplitZ..H) with 45-degree slots for the lid gussets; null = plain walls */
+  wallTopMesh: RawMesh | null;
+  /** Two-piece hinge: length of filament pin to cut for each hinge group (mm) */
+  pinLengthsMm: number[];
+  /** How far the lid's knuckles reach below the closed lid's underside (mm) */
+  lidHangBelowRim: number;
+  /** Build the plain walls only up to this height when wallTopMesh is used */
+  wallSplitZ: number;
+}
+
+/** Sutherland-Hodgman clip of a convex polygon to the half-plane nx*x + ny*y >= d. */
+function clipHalfPlane(poly: P2[], nx: number, ny: number, d: number): P2[] {
+  const out: P2[] = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const da = nx * a.x + ny * a.y - d;
+    const db = nx * b.x + ny * b.y - d;
+    if (da >= 0) out.push(a);
+    if ((da >= 0) !== (db >= 0)) {
+      const t = da / (da - db);
+      out.push({ x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) });
+    }
+  }
+  return out.length >= 3 && Math.abs(area2D(out)) > 1e-6 ? out : [];
+}
+
+/** Triangulates a polygon with holes into triangles (as point triples). */
+function triangulatePolygon(outerIn: P2[], holesIn: P2[][]): P2[][] {
+  const outer = dedupe(outerIn).map((p) => new THREE.Vector2(p.x, p.y));
+  if (outer.length < 3) return [];
+  if (area2D(outer) < 0) outer.reverse();
+  const holes = holesIn
+    .map((h) => dedupe(h).map((p) => new THREE.Vector2(p.x, p.y)))
+    .filter((h) => h.length >= 3)
+    .map((h) => (area2D(h) > 0 ? h.reverse() : h));
+  let faces: number[][];
+  try {
+    faces = THREE.ShapeUtils.triangulateShape(outer, holes);
+  } catch {
+    return [];
+  }
+  const all = [...outer, ...holes.flat()];
+  return faces.map((f) => f.map((i) => ({ x: all[i].x, y: all[i].y })));
+}
+
+/**
+ * Box wall top band with 45-degree slots. Each slot removes wall where y >= yCutAt(z) inside its x range
+ * (local hinge frame). The band is rebuilt from the wall's triangulation; triangles away from the slots
+ * are extruded through the whole band, triangles touching a slot are cut slice by slice.
+ */
+function buildSlottedWallTop(
+  wallPolys: { outer: P2[]; holes: P2[][] }[],
+  slots: { x0: number; x1: number }[],
+  zBottom: number,
+  zTop: number,
+  yCutAt: (z: number) => number
+): RawMesh {
+  const mesh = emptyMesh();
+  const sliceH = 0.4;
+  const slices = Math.max(1, Math.ceil((zTop - zBottom) / sliceH));
+  const yCutMin = yCutAt(zTop);
+  for (const wp of wallPolys) {
+    for (const tri of triangulatePolygon(wp.outer, wp.holes)) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const p of tri) {
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
+      }
+      const touches = slots.some((s) => maxX > s.x0 && minX < s.x1) && maxY > yCutMin;
+      if (!touches) {
+        appendInto(mesh, extrudePoly2D(tri, [], zBottom, zTop));
+        continue;
+      }
+      for (let k = 0; k < slices; k++) {
+        const z0 = zBottom + ((zTop - zBottom) * k) / slices;
+        const z1 = zBottom + ((zTop - zBottom) * (k + 1)) / slices;
+        const yCut = yCutAt(z1); // the slot is widest at the top of each slice
+        let pieces: P2[][] = [tri];
+        for (const s of slots) {
+          const next: P2[][] = [];
+          for (const p of pieces) {
+            // p minus {x0 <= x <= x1, y >= yCut} = three convex pieces
+            const left = clipHalfPlane(p, -1, 0, -s.x0); // x <= x0
+            const right = clipHalfPlane(p, 1, 0, s.x1); // x >= x1
+            let mid = clipHalfPlane(p, 1, 0, s.x0);
+            if (mid.length) mid = clipHalfPlane(mid, -1, 0, -s.x1);
+            if (mid.length) mid = clipHalfPlane(mid, 0, -1, -yCut); // y <= yCut
+            for (const q of [left, right, mid]) if (q.length) next.push(q);
+          }
+          pieces = next;
+        }
+        for (const p of pieces) appendInto(mesh, extrudePoly2D(p, [], z0, z1));
+      }
+    }
+  }
+  return mesh;
 }
 
 /**
@@ -662,6 +762,31 @@ export function buildPrintInPlaceHinge(o: {
   clearance: number;
   gripTab?: boolean;
   side?: HingeSide;
+  /** Box wall polygons (box coordinates). When given, lid knuckles get gussets and the wall gets slots. */
+  wallPolys?: { outer: P2[]; holes: P2[][] }[];
+  /**
+   * Clamshell: the lid has its own walls and boxHeight/lidThickness are the box-half and lid-half depths.
+   * With equal halves the pin sits right at the rim, so both halves get short 45-degree wall brackets
+   * instead of long lid posts (strong at any box height).
+   */
+  clamshell?: boolean;
+  /**
+   * Vertical gap between the box rim and the closed lid rim. The pin needs clearance in its hole, so a
+   * closed lid hanging on the pin sags at the hinge end; with zero gap the rims collide there first and
+   * lever the lid open. The hinge axis is raised by half this gap so the closed lid clears the rim.
+   */
+  rimGap?: number;
+  /**
+   * Two-piece hinge: the lid is printed separately and joined with a 1.75 mm filament offcut pushed through
+   * the knuckles. The pin can then sit right at the rim (like the clamshell) even for a flat lid.
+   */
+  pin?: boolean;
+  /**
+   * Floating hinge: the lid's knuckle hole is a vertical slot this much taller than round, so the closed
+   * lid always rests flat on the rim (front and back) and simply rides up a little at the hinge end if the
+   * print comes out slightly tall, instead of jamming and springing open.
+   */
+  slotLift?: number;
 }): HingeResult | null {
   if (o.outerRing.length < 3) return null;
   const phi = chooseHingeAngleForSide(o.outerRing, o.side ?? 'back');
@@ -675,25 +800,72 @@ export function buildPrintInPlaceHinge(o: {
   };
 
   const c = Math.max(0.2, Math.min(0.8, o.clearance));
+  const pinMode = !!o.pin;
+  const slotLift = Math.max(0, o.slotLift ?? 0.5);
   const rPin = 1.35;
   const rIn = rPin + c;
-  const rOut = Math.max(2.8, rIn + 1.2);
+  // Two-piece: 1.75 mm filament pin, snug in the box knuckles and free in the lid knuckles
+  const FIL_R = 0.875;
+  const rBoxHole = FIL_R + 0.05;
+  const rLidHole = pinMode ? FIL_R + Math.max(0.2, c * 0.6) : rIn;
+  const rOut = pinMode ? Math.max(2.6, rLidHole + slotLift + 1.2) : Math.max(2.8, rIn + slotLift + 1.2);
   const gap = 0.6;
   const H = o.boxHeight;
   const T = o.lidThickness;
   const ya = scan.lineY + rOut + gap;
-  const za = (H + T) / 2;
+  const rimGap = Math.max(0, o.rimGap ?? 0);
+  const Hc = H + rimGap; // closed lid rim height (box rim is H)
+  // Print-in-place: halfway between bed and closed lid. Two-piece: at the rim (kept inside the lid plate).
+  const za = pinMode ? Math.min(Hc, Hc + T - rOut - 0.2) : (H + T + rimGap) / 2;
   if (za - rOut < 0.6) return null;
+  const rimStyle = !!o.clamshell || pinMode; // box brackets must stay below a lid that sits on the rim
+  /** Lid knuckle hole: a vertical slot (rides up when the lid sits on a slightly tall rim) */
+  const lidSlot = (cy: number, cz: number, r: number, dz: number, apex: number) => {
+    const pts = [...circlePts(cy, cz, r, circSeg), ...circlePts(cy, cz + dz, r, circSeg)];
+    if (apex) pts.push({ x: cy, y: cz + (apex > 0 ? Math.max(0, dz) + r * Math.SQRT2 : Math.min(0, dz) - r * Math.SQRT2) });
+    return convexHull(pts);
+  };
+  const pinLengthsMm: number[] = [];
   const ov = Math.max(0.4, Math.min(1.2, o.wall * 0.5));
   const SQ2 = Math.SQRT2;
+  const circSeg = 48;
 
   const body = emptyMesh();
   const lidPrint = emptyMesh();
-  const circSeg = 48;
   const circle = circlePts(ya, za, rOut, circSeg);
   const groups = planHingeGroups(scan);
+  // Gusset size: up to 4 mm, limited by the post height available under the barrel
+  const gussetL = o.wallPolys && !o.clamshell ? Math.max(0, Math.min(4, 0.4 * (za - rIn - T))) : 0;
+  const slots: { x0: number; x1: number }[] = [];
+  const lidClosedDirect = emptyMesh(); // clamshell lid knuckles, built straight in the closed pose
+
+  /** Thin slices along a knuckle, each with its own wall root so brackets hug curved outlines. */
+  const knuckleSlices = (sx0: number, sx1: number, yMinSeg: number) => {
+    const out: { a: number; b: number; yW: number; sMax: number }[] = [];
+    const slices = Math.max(1, Math.ceil((sx1 - sx0) / 0.6));
+    for (let s = 0; s < slices; s++) {
+      const a = sx0 + ((sx1 - sx0) * s) / slices;
+      const b = sx0 + ((sx1 - sx0) * (s + 1)) / slices;
+      let sMin = Infinity;
+      let sMax = -Infinity;
+      for (let k = 0; k <= 2; k++) {
+        const y = yBackAt(a + ((b - a) * k) / 2);
+        if (!isFinite(y)) continue;
+        sMin = Math.min(sMin, y);
+        sMax = Math.max(sMax, y);
+      }
+      if (!isFinite(sMin)) {
+        sMin = yMinSeg;
+        sMax = yMinSeg;
+      }
+      const depth = Math.max(0.2, Math.min(ov, sMin - (sMax - o.wall) - 0.3));
+      out.push({ a, b, yW: sMin - depth, sMax });
+    }
+    return out;
+  };
 
   for (const g of groups) {
+    let holeReach = g.x0 + g.x1 <= 0 ? -Infinity : Infinity; // how far the pin hole goes in from the entry end
     const L = g.x1 - g.x0;
     let n = L >= 20 ? 5 : 3;
     while (n > 3 && (L - (n - 1) * c) / n < 4) n -= 2;
@@ -720,33 +892,94 @@ export function buildPrintInPlaceHinge(o: {
         // Body knuckle: barrel + 45 degree gusset bracket rooted in the back wall (no web to the bed).
         // The bracket is built in thin slices so on curved outlines each slice roots into the wall
         // without poking through the inside face into the box cavity.
-        appendInto(body, prismAlongX(circle, [], sx0, sx1));
-        const zT = Math.min(H - 0.5, za + rOut * 0.35);
-        const slices = Math.max(1, Math.ceil((sx1 - sx0) / 0.6));
-        for (let s = 0; s < slices; s++) {
-          const a = sx0 + ((sx1 - sx0) * s) / slices;
-          const b = sx0 + ((sx1 - sx0) * (s + 1)) / slices;
-          let sMin = Infinity;
-          let sMax = -Infinity;
-          for (let k = 0; k <= 2; k++) {
-            const y = yBackAt(a + ((b - a) * k) / 2);
-            if (!isFinite(y)) continue;
-            sMin = Math.min(sMin, y);
-            sMax = Math.max(sMax, y);
+        if (!pinMode) appendInto(body, prismAlongX(circle, [], sx0, sx1));
+        // Clamshell / two-piece: the lid sits directly on the rim, so the bracket must stay below it
+        const zT = rimStyle ? H - c : Math.min(H - 0.5, za + rOut * 0.35);
+        // Two-piece: snug filament hole (teardrop, prints cleanly sideways). Entry from the outer end of the
+        // group; the inner end is closed off so the pin can't push through.
+        const entryFromLeft = g.x0 + g.x1 <= 0;
+        const blindX = entryFromLeft ? g.x1 - 1.0 : g.x0 + 1.0; // closed end wall at least ~1 mm
+        const boxHole = convexHull([...circlePts(ya, za, rBoxHole, 24), { x: ya, y: za + rBoxHole * SQ2 }]);
+        // 45-degree underside: z = za - (ya - y) - rOut*sqrt2 (tangent to the barrel)
+        const zUnder = (y: number) => Math.max(0, za - (ya - y) - rOut * SQ2);
+        for (const sl of knuckleSlices(sx0, sx1, yMin)) {
+          if (!rimStyle) {
+            const pts = [...circle, { x: sl.yW, y: zUnder(sl.yW) }, { x: sl.yW, y: zT }];
+            appendInto(body, prismAlongX(convexHull(pts), [], sl.a, sl.b));
+            continue;
           }
-          if (!isFinite(sMin)) {
-            sMin = yMin;
-            sMax = yMin;
-          }
-          const depth = Math.max(0.2, Math.min(ov, sMin - (sMax - o.wall) - 0.3));
-          const yW = sMin - depth;
-          const zB = Math.max(0, za - (ya - yW) - rOut * SQ2);
-          const profile = convexHull([...circle, { x: yW, y: zB }, { x: yW, y: zT }]);
-          appendInto(body, prismAlongX(profile, [], a, b));
+          // Clamshell: two convex pieces so the top stays flat just under the rim across the wall
+          // (one hull would slope up from the wall root and poke into the lid half's wall).
+          const yo = sl.sMax + 0.3; // just outside the wall face
+          appendInto(
+            body,
+            prismAlongX(
+              [
+                { x: sl.yW, y: zUnder(sl.yW) },
+                { x: yo, y: zUnder(yo) },
+                { x: yo, y: zT },
+                { x: sl.yW, y: zT },
+              ],
+              [],
+              sl.a,
+              sl.b
+            )
+          );
+          // A slice is solid (closed end) only once it lies entirely past the end-wall line
+          const blind = entryFromLeft ? sl.a >= blindX - 1e-6 : sl.b <= blindX + 1e-6;
+          const holes = pinMode && !blind ? [boxHole] : [];
+          if (pinMode && !blind) holeReach = entryFromLeft ? Math.max(holeReach, sl.b) : Math.min(holeReach, sl.a);
+          appendInto(
+            body,
+            prismAlongX(convexHull([...circle, { x: yo, y: zUnder(yo) }, { x: yo, y: zT }]), holes, sl.a, sl.b)
+          );
+        }
+      } else if (o.clamshell) {
+        // Clamshell lid knuckle (closed pose): the mirror image of a body knuckle, hanging off the lid
+        // half's own back wall just above the rim, with the pin hole through the barrel.
+        const hole = lidSlot(ya, za, rIn, -slotLift, 0);
+        const lidTop = Hc + T - 0.6;
+        const zOver = (y: number) => Math.min(lidTop, za + (ya - y) + rOut * SQ2);
+        for (const sl of knuckleSlices(sx0, sx1, yMin)) {
+          const yo = sl.sMax + 0.3;
+          // Root block inside the lid half's wall (flat just above the rim) + barrel piece outside it
+          appendInto(
+            lidClosedDirect,
+            prismAlongX(
+              [
+                { x: sl.yW, y: Hc + c },
+                { x: yo, y: Hc + c },
+                { x: yo, y: zOver(yo) },
+                { x: sl.yW, y: zOver(sl.yW) },
+              ],
+              [],
+              sl.a,
+              sl.b
+            )
+          );
+          appendInto(
+            lidClosedDirect,
+            prismAlongX(convexHull([...circle, { x: yo, y: Hc + c }, { x: yo, y: zOver(yo) }]), [hole], sl.a, sl.b)
+          );
+        }
+      } else if (pinMode) {
+        // Two-piece lid knuckle (closed pose): barrel with a free-turning slot for the filament pin, joined
+        // to the flat lid by a tab that stays clear of the hole. The lid prints face-down, so the slot's
+        // lower end (closed) is its top when printing: teardrop apex that way.
+        const hole = lidSlot(ya, za, rLidHole, -slotLift, -1);
+        for (const sl of knuckleSlices(sx0, sx1, yMin)) {
+          const yo = sl.sMax + 0.3; // just behind the box wall
+          // Root: continues the lid plate back to the knuckle (inside the plate's thickness)
+          appendInto(lidClosedDirect, boxPrism(sl.a, sl.b, sl.yW, yo + 0.2, Hc, Hc + T));
+          // One smooth knuckle: flat on top (level with the lid, so it prints on the bed), round at the
+          // back, and sloping cleanly underneath from the rim edge down to the barrel
+          const profile = convexHull([...circle, { x: yo, y: Hc }, { x: yo, y: Hc + T }, { x: ya + rOut, y: Hc + T }]);
+          appendInto(lidClosedDirect, prismAlongX(profile, [hole], sl.a, sl.b));
         }
       } else {
         // Lid knuckle (print pose = lid face-down at +Y): tube on a slim rounded post + flat tab into the lid
-        appendInto(lidPrint, prismAlongX(circle, [circlePts(ya, za, rIn, circSeg)], sx0, sx1));
+        // (slot points up while printing = down when closed)
+        appendInto(lidPrint, prismAlongX(circle, [lidSlot(ya, za, rIn, slotLift, 0)], sx0, sx1));
         // Post = lower part of the barrel (kept fully below the pin hole) flaring down to the bed
         const post = convexHull([
           ...circle.filter((p) => p.y <= za - rIn - 0.2),
@@ -755,10 +988,34 @@ export function buildPrintInPlaceHinge(o: {
         ]);
         appendInto(lidPrint, prismAlongX(post, [], sx0, sx1));
         appendInto(lidPrint, boxPrism(sx0, sx1, ya, 2 * ya - yMin + ov, 0, T));
+        // 45-degree gusset where the post meets the tab: spreads the opening/closing load over many
+        // layers instead of one sharp corner. When closed it nests in a matching slot in the box wall.
+        if (gussetL > 0.5) {
+          appendInto(
+            lidPrint,
+            prismAlongX(
+              [
+                { x: ya + rOut - 1.0, y: T - 0.05 },
+                { x: ya + rOut + gussetL, y: T - 0.05 },
+                { x: ya + rOut - 1.0, y: T + gussetL + 1.0 },
+              ],
+              [],
+              sx0,
+              sx1
+            )
+          );
+          slots.push({ x0: sx0 - c, x1: sx1 + c });
+        }
       }
     }
-    // Captive pin through the group, anchored in its two end body knuckles
-    appendInto(body, prismAlongX(circlePts(ya, za, rPin, 32), [], g.x0, g.x1));
+    if (pinMode) {
+      const entryFromLeft = g.x0 + g.x1 <= 0;
+      const depth = entryFromLeft ? holeReach - g.x0 : g.x1 - holeReach;
+      if (isFinite(depth)) pinLengthsMm.push(Math.floor((depth - 0.3) * 2) / 2); // flush at the entry end
+    } else {
+      // Captive pin through the group, anchored in its two end body knuckles
+      appendInto(body, prismAlongX(circlePts(ya, za, rPin, 32), [], g.x0, g.x1));
+    }
   }
 
   if (body.vertices.length === 0) return null;
@@ -781,13 +1038,33 @@ export function buildPrintInPlaceHinge(o: {
     });
   const axisXY = rot2({ x: 0, y: ya }, phi);
 
+  // Slotted wall top: the closed gusset occupies y >= (ya - rOut - L) + (H - z) above z = H - L - 1, so the
+  // wall is cut back along that 45-degree line (plus clearance) under each lid knuckle. While opening the
+  // gusset moves up and away from the wall, so the slot never needs to be bigger than its closed shape.
+  let wallTopMesh: RawMesh | null = null;
+  let wallSplitZ = H;
+  if (o.wallPolys && slots.length > 0) {
+    wallSplitZ = Math.min(H - 0.5, Hc - gussetL - 1.0 - c);
+    const slack = c * Math.SQRT2;
+    const yCutAt = (z: number) => ya - rOut - gussetL + (Hc - z) - slack;
+    const localWalls = o.wallPolys.map((w) => ({
+      outer: w.outer.map((p) => rot2(p, -phi)),
+      holes: w.holes.map((h) => h.map((p) => rot2(p, -phi))),
+    }));
+    wallTopMesh = toBox(buildSlottedWallTop(localWalls, slots, wallSplitZ, H, yCutAt));
+  }
+
   return {
     bodyMesh: toBox(body),
-    lidMeshClosed: toBox(rotateAboutXAxis(lidPrint, ya, za, Math.PI)),
+    lidMeshClosed: toBox(mergeMeshes(rotateAboutXAxis(lidPrint, ya, za, Math.PI), lidClosedDirect)),
     axisPoint: { x: axisXY.x, y: axisXY.y, z: za },
     axisDir: { x: Math.cos(phi), y: Math.sin(phi), z: 0 },
     gripTabPts: tab,
     groupCount: groups.length,
+    wallTopMesh,
+    wallSplitZ,
+    pinLengthsMm,
+    lidHangBelowRim: Math.max(0, Hc - (za - rOut)),
   };
 }
 
