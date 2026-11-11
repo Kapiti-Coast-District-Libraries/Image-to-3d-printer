@@ -8,6 +8,7 @@ import {
   buildScrewLid,
   buildSlidingLid,
   emptyMesh,
+  extrudeClippedToHalfPlane,
   extrudePoly2D,
   gripTabPts,
   mapVertices,
@@ -597,8 +598,25 @@ export function buildExtrudedModel(
       minBoxHeightMm = Math.max(minBoxHeightMm, 2 * (floorThicknessMm + 4) - lidTotalThicknessMm, 2 * (lidTotalThicknessMm + 3) - lidTotalThicknessMm);
     }
     const boxHeightMm = Math.max(minBoxHeightMm, params.boxHeightMm ?? 28.0);
+    const measuredWallForLip = () => Math.max(0.8, params.strokeWidthMm || 2.5);
     /** Depth of each half (box half and lid half) of a clamshell hinged box */
     const clamshellHalfMm = (boxHeightMm + lidTotalThicknessMm) / 2;
+
+    // ---- Clamshell rim lip: the inner part of the box half's wall rises above the rim and the lid half's
+    // wall (thinned at its bottom) drops over it. Optional snap: a 45-degree bead round the lip near its top
+    // clicks into a matching groove inside the lid wall. The flex is tiny and shared round the whole rim.
+    const rimLipMode = clamshell ? params.boxRimLip ?? 'snap_light' : 'none';
+    const lipOn = rimLipMode !== 'none';
+    const lipC = 0.2; // sliding clearance between lip and lid wall
+    const lipT = Math.min(1.2, Math.max(0.8, measuredWallForLip() * 0.45)); // lip thickness (inner part of the wall)
+    const lipH = Math.min(3.2, Math.max(2.0, clamshellHalfMm - floorThicknessMm - 6)); // lip height above the rim
+    const snapMm = rimLipMode === 'snap_firm' ? 0.3 : rimLipMode === 'snap_light' ? 0.15 : 0;
+    // bead: 45-degree flanks up to (clearance + snap) proud of the lip face, with a short flat top
+    const beadDepth = snapMm > 0 ? lipC + snapMm : 0;
+    const beadH = 2 * beadDepth + 0.3;
+    const beadZ0 = clamshellHalfMm + lipH - 0.5 - beadH;
+    const beadAt = (z: number) =>
+      beadDepth <= 0 ? 0 : Math.max(0, Math.min(beadDepth, z - beadZ0, beadZ0 + beadH - z));
     // Rim clearance for hinged lids: grows with the hinge gap (a looser pin lets the lid sag further)
     // Closed lids sit flush on the rim; the lid knuckles' slotted holes absorb any print variation
     const hingeRimGapMm = 0;
@@ -620,6 +638,11 @@ export function buildExtrudedModel(
     let lidOffsetX = 0;
     let lidZBase = 0;
 
+    /** Rings that run along the inside face of the box wall (outer = hole = inner face); offset to make lips */
+    const innerFaceRings = (): TracedPolygon[] =>
+      upperWallsForMeasure
+        .filter((p) => p.holes.length > 0 && p.holes[0].length >= 3)
+        .map((p) => ({ outer: p.holes[0], holes: [p.holes[0]], area: 1 }));
     const upperWallsForMeasure =
       traceResult.boxUpperWallPolygons.length > 0
         ? traceResult.boxUpperWallPolygons
@@ -695,7 +718,8 @@ export function buildExtrudedModel(
         boxHeight: clamshell ? clamshellHalfMm : boxHeightMm,
         lidThickness: clamshell ? clamshellHalfMm : lidTotalThicknessMm,
         clamshell,
-        wall: measuredWall,
+        // with a rim lip the lid wall is thinner at the bottom, so brackets must root in the outer part
+        wall: lipOn ? Math.max(0.6, measuredWall - lipT - lipC - 0.2) : measuredWall,
         clearance: params.boxHingeClearanceMm ?? 0.4,
         rimGap: hingeRimGapMm,
         pin: pinHinge,
@@ -836,6 +860,42 @@ export function buildExtrudedModel(
         appendBoxMesh(
           extrudePolygonsToManifold(upperWalls, transformBoxPt, floorThicknessMm, plainWallTop, 0, 0, 0)
         );
+        if (lipOn) {
+          // ring built from the wall's inner face: outer edge pushed out by lipT (into the wall), inner edge = cavity face
+          const lipRing = (outerOff: number, z0: number, z1: number) =>
+            extrudePolygonsToManifold(innerFaceRings(), transformBoxPt, z0, z1, 0, 0, outerOff);
+          appendBoxMesh(lipRing(lipT, clamshellHalfMm - 0.05, clamshellHalfMm + lipH));
+          if (beadDepth > 0 && hinge) {
+            // Bead only on the front and sides: near the hinge the lid wall swings in on an arc rather than
+            // dropping straight down, so a bead there would drag instead of clicking (the hinge holds that side).
+            const u = hinge.axisDir;
+            const A = hinge.axisPoint;
+            let nx = -u.y;
+            let ny = u.x;
+            const cxy = outerRingMm.reduce((acc, p) => ({ x: acc.x + p.x / outerRingMm.length, y: acc.y + p.y / outerRingMm.length }), { x: 0, y: 0 });
+            if (nx * (cxy.x - A.x) + ny * (cxy.y - A.y) < 0) {
+              nx = -nx;
+              ny = -ny;
+            }
+            const reach = Math.max(...outerRingMm.map((p) => nx * (p.x - A.x) + ny * (p.y - A.y)));
+            const keepFrom = nx * (A.x + boxOffsetX) + ny * A.y + Math.max(18, 0.45 * reach);
+            const steps = Math.max(4, Math.round(beadH / 0.1));
+            for (const poly of innerFaceRings()) {
+              const face = cleanRing2D(poly.outer.map(transformBoxPt));
+              if (face.length < 3) continue;
+              if (signedAreaVec2(face) < 0) face.reverse();
+              for (let k = 0; k < steps; k++) {
+                const z0 = beadZ0 + (beadH * k) / steps;
+                const z1 = beadZ0 + (beadH * (k + 1)) / steps;
+                const p = beadAt((z0 + z1) / 2);
+                if (p <= 0.01) continue;
+                const out = offsetRingVec2(face, lipT + p).map((v) => ({ x: v.x, y: v.y }));
+                const hole = face.map((v) => ({ x: v.x, y: v.y }));
+                appendBoxMesh(extrudeClippedToHalfPlane(out, [hole], z0, z1, nx, ny, keepFrom));
+              }
+            }
+          }
+        }
         if (hinge?.wallTopMesh) {
           appendBoxMesh(
             mapVertices(hinge.wallTopMesh, (v) => ({ x: v.x + boxOffsetX, y: v.y, z: v.z }))
@@ -1143,10 +1203,39 @@ export function buildExtrudedModel(
           );
           // Clamshell lid half: its own walls from the rim up to the underside of the art plate
           if (clamshell) {
-            appendInto(
-              lidExtras,
-              extrudePolygonsToManifold(upperWallsForMeasure, transformPt, clamshellHalfMm + hingeRimGapMm, lidZBase + 0.05, 0, 0, 0)
-            );
+            const rimZ = clamshellHalfMm + hingeRimGapMm;
+            if (!lipOn) {
+              appendInto(
+                lidExtras,
+                extrudePolygonsToManifold(upperWallsForMeasure, transformPt, rimZ, lidZBase + 0.05, 0, 0, 0)
+              );
+            } else {
+              // inner face pushed out by lipT + clearance over the lip; groove (bead + clearance) at the bead
+              const band = (holeWiden: number, z0: number, z1: number) =>
+                appendInto(
+                  lidExtras,
+                  extrudePolygonsToManifold(upperWallsForMeasure, transformPt, z0, z1, 0, -holeWiden, 0)
+                );
+              const bandTop = rimZ + lipH + lipC;
+              if (beadDepth > 0) {
+                band(lipT + lipC, rimZ, beadZ0);
+                const steps = Math.max(4, Math.round(beadH / 0.1));
+                for (let k = 0; k < steps; k++) {
+                  const z0 = beadZ0 + (beadH * k) / steps;
+                  const z1 = beadZ0 + (beadH * (k + 1)) / steps;
+                  // the groove follows the bead's 45-degree profile, widened by the clearance
+                  const p = Math.max(beadAt(z0), beadAt(z1));
+                  band(lipT + lipC + p + (p > 0.01 ? lipC : 0), z0, z1);
+                }
+                band(lipT + lipC, beadZ0 + beadH, bandTop);
+              } else {
+                band(lipT + lipC, rimZ, bandTop);
+              }
+              appendInto(
+                lidExtras,
+                extrudePolygonsToManifold(upperWallsForMeasure, transformPt, bandTop - 0.02, lidZBase + 0.05, 0, 0, 0)
+              );
+            }
           }
           // Tab sits opposite the hinge, which may follow an angled edge on contour boxes
           if (gripTab && hinge.gripTabPts) {

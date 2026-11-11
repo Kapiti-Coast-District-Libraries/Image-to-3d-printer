@@ -952,6 +952,43 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                     </p>
                   </div>
                 )}
+                {resolved === 'hinged' &&
+                  (params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell')) ===
+                    'clamshell' && (
+                  <div className="space-y-1 pt-1">
+                    <span className="text-[11px] font-medium text-slate-600 block">Rim Lip</span>
+                    <div className="grid grid-cols-4 gap-1 bg-slate-100 p-1 rounded-xl">
+                      {(
+                        [
+                          ['none', 'None'],
+                          ['lip', 'Lip'],
+                          ['snap_light', 'Light snap'],
+                          ['snap_firm', 'Firm snap'],
+                        ] as [NonNullable<TraceParameters['boxRimLip']>, string][]
+                      ).map(([opt, label]) => (
+                        <button
+                          key={opt}
+                          type="button"
+                          onClick={() => setParams((p) => ({ ...p, boxRimLip: opt }))}
+                          className={`px-1 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer truncate ${
+                            (params.boxRimLip ?? 'snap_light') === opt
+                              ? 'bg-white text-teal-800 shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-snug">
+                      {(params.boxRimLip ?? 'snap_light') === 'none'
+                        ? 'Plain rims: the lid just rests on the box.'
+                        : (params.boxRimLip ?? 'snap_light') === 'lip'
+                        ? 'A lip round the inside of the rim lines the lid up and stops it sliding. No click.'
+                        : 'A lip round the rim lines the lid up, and a small bead clicks into a groove inside the lid to hold it shut. The flex is tiny and shared round the whole rim. Try Light first; use Firm if it opens too easily.'}
+                    </p>
+                  </div>
+                )}
                 {resolved === 'hinged' && (
                   <div className="space-y-1 pt-1">
                     <span className="text-[11px] font-medium text-slate-600 block">Hinge Side</span>

@@ -671,6 +671,27 @@ function clipHalfPlane(poly: P2[], nx: number, ny: number, d: number): P2[] {
   return out.length >= 3 && Math.abs(area2D(out)) > 1e-6 ? out : [];
 }
 
+/**
+ * Extrudes the part of a polygon (with holes) lying in the half-plane nx*x + ny*y >= d, as small convex
+ * prisms from its triangulation (touching prisms fuse in the slicer).
+ */
+export function extrudeClippedToHalfPlane(
+  outer: P2[],
+  holes: P2[][],
+  z0: number,
+  z1: number,
+  nx: number,
+  ny: number,
+  d: number
+): RawMesh {
+  const m = emptyMesh();
+  for (const tri of triangulatePolygon(outer, holes)) {
+    const piece = clipHalfPlane(tri, nx, ny, d);
+    if (piece.length) appendInto(m, extrudePoly2D(piece, [], z0, z1));
+  }
+  return m;
+}
+
 /** Triangulates a polygon with holes into triangles (as point triples). */
 function triangulatePolygon(outerIn: P2[], holesIn: P2[][]): P2[][] {
   const outer = dedupe(outerIn).map((p) => new THREE.Vector2(p.x, p.y));
