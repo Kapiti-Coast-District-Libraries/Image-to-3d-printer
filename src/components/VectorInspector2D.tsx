@@ -37,6 +37,9 @@ interface VectorInspector2DProps {
   onKeepAreaAtPixel?: (pixelX: number, pixelY: number) => void;
   keptRegionsCount?: number;
   onUndoLastKeptRegion?: () => void;
+  /** Painting is driven by the Colours panel: hide this view's own Merge Item / Keep Area buttons */
+  hidePaintToolbar?: boolean;
+  paintBannerText?: string;
 }
 
 export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
@@ -59,6 +62,8 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
   onKeepAreaAtPixel,
   keptRegionsCount = 0,
   onUndoLastKeptRegion,
+  hidePaintToolbar = false,
+  paintBannerText,
 }) => {
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const quantizedCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -191,7 +196,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
           <div className="flex items-center gap-2">
             <MousePointerClick className="w-4 h-4 text-cyan-300 animate-pulse" />
             <span className="font-medium">
-              Merge Item Mode: Click any unwanted detail or island on the artwork below to absorb it into its surrounding colour
+              {paintBannerText ?? 'Merge Item Mode: Click any unwanted detail or island on the artwork below to absorb it into its surrounding colour'}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -233,8 +238,8 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
           <div className="flex items-center gap-2">
             <PaintBucket className="w-4 h-4 text-amber-300 animate-pulse" />
             <span className="font-medium">
-              Keep Area: click a spot that was wrongly removed as background (e.g. inside an outline that
-              is open at one end) to fill it back in
+              {paintBannerText ??
+                'Keep Area: click a spot that was wrongly removed as background (e.g. inside an outline that is open at one end) to fill it back in'}
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -536,7 +541,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
         </div>
 
         <div className="pointer-events-auto flex items-center gap-2 bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-lg px-3 py-1.5">
-          {onToggleKeepAreaMode && (
+          {onToggleKeepAreaMode && !hidePaintToolbar && (
             <button
               type="button"
               onClick={onToggleKeepAreaMode}
@@ -556,7 +561,7 @@ export const VectorInspector2D: React.FC<VectorInspector2DProps> = ({
             </button>
           )}
 
-          {onToggleMergeItemMode && (
+          {onToggleMergeItemMode && !hidePaintToolbar && (
             <>
               <button
                 type="button"

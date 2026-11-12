@@ -375,6 +375,17 @@ ${modelInstancesXml}
     nozzle_diameter: ['0.4'],
     filament_colour: filamentSlots.map((f) => f.hex),
     default_filament_colour: filamentSlots.map((f) => f.hex),
+    // Newer Bambu Studio has "mixed filaments" (layer-alternated colour blends). If these per-filament keys
+    // are missing it pads them itself and can flag a slot as a broken mix ("Mixed filament has invalid or
+    // mismatched components"), so state explicitly that every slot is a plain single-colour filament.
+    filament_colour_type: filamentSlots.map(() => '1'),
+    filament_multi_colour: filamentSlots.map((f) => f.hex),
+    filament_is_mixed: filamentSlots.map(() => '0'),
+    filament_mixed_components: filamentSlots.map(() => ''),
+    filament_mixed_gradient: filamentSlots.map(() => '0'),
+    filament_mixed_gradient_range: filamentSlots.map(() => ''),
+    filament_mixed_sublayer_ratios: filamentSlots.map(() => ''),
+    enable_mixed_color_sublayer: '0',
     filament_type: filamentSlots.map(() => 'PLA'),
     filament_vendor: filamentSlots.map(() => 'Bambu Lab'),
     filament_ids: filamentSlots.map((f) => f.filamentId),

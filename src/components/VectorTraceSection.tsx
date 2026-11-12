@@ -31,7 +31,7 @@ export const VectorTraceSection: React.FC<VectorTraceSectionProps> = ({
           )}
           <Sliders className="w-3.5 h-3.5 text-teal-700 shrink-0" />
           <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wide truncate">
-            06. Vector Smoothing Engine
+            05. Advanced
           </h3>
           <span className="text-[10px] font-mono text-teal-700 bg-teal-50 border border-teal-200 px-1.5 py-0.2 rounded-full hidden sm:inline">
             ε {params.smoothEpsilon.toFixed(2)}
@@ -74,8 +74,45 @@ export const VectorTraceSection: React.FC<VectorTraceSectionProps> = ({
       {isExpanded && (
         <div className="p-4 space-y-3.5 border-t border-slate-200/80 bg-slate-50/50">
           <p className="text-xs text-slate-500 leading-relaxed">
-            Inkscape-style Potrace / Chaikin spline smoothing and corner simplification algorithms.
+            Fine-tuning for tricky pictures. The defaults suit most images.
           </p>
+
+          {/* Number of colours */}
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-slate-600">Number of colours</span>
+            <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+              {([2, 3, 4] as const).map((cnt) => (
+                <button
+                  key={cnt}
+                  type="button"
+                  onClick={() => setParams((p) => ({ ...p, numColors: cnt }))}
+                  className={`px-2 py-0.5 text-[11px] font-semibold rounded transition-colors cursor-pointer ${
+                    params.numColors === cnt ? 'bg-teal-600 text-white' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {cnt}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Background removal sensitivity */}
+          <div>
+            <div className="flex items-center justify-between text-xs mb-1">
+              <span className="text-slate-600">Background removal sensitivity</span>
+              <span className="font-mono font-semibold text-teal-700">{params.bgTolerance}</span>
+            </div>
+            <input
+              type="range"
+              min={4}
+              max={60}
+              step={1}
+              value={params.bgTolerance}
+              onChange={(e) => setParams((p) => ({ ...p, bgTolerance: parseInt(e.target.value, 10) }))}
+              className="w-full accent-blue-600 cursor-pointer"
+              title="Higher removes more of the picture's background colour around the artwork"
+            />
+          </div>
 
           <div>
             <div className="flex items-center justify-between text-xs mb-1">

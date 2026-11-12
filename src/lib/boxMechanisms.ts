@@ -823,13 +823,15 @@ export function buildPrintInPlaceHinge(o: {
   const c = Math.max(0.2, Math.min(0.8, o.clearance));
   const pinMode = !!o.pin;
   const slotLift = Math.max(0, o.slotLift ?? 0.5);
-  const rPin = 1.35;
+  // Print-in-place pin: 3.2 mm across (was 2.7; thin rings snapped when a box was opened too far)
+  const rPin = 1.6;
   const rIn = rPin + c;
   // Two-piece: 1.75 mm filament pin, snug in the box knuckles and free in the lid knuckles
   const FIL_R = 0.875;
   const rBoxHole = FIL_R + 0.05;
   const rLidHole = pinMode ? FIL_R + Math.max(0.2, c * 0.6) : rIn;
-  const rOut = pinMode ? Math.max(2.6, rLidHole + slotLift + 1.2) : Math.max(2.8, rIn + slotLift + 1.2);
+  // Ring wall round the (slotted) hole: 2.0 mm at its thinnest for print-in-place knuckles
+  const rOut = pinMode ? Math.max(2.6, rLidHole + slotLift + 2.0) : Math.max(3.0, rIn + slotLift + 2.0);
   const gap = 0.6;
   const H = o.boxHeight;
   const T = o.lidThickness;

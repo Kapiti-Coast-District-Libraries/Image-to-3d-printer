@@ -608,9 +608,13 @@ export function buildExtrudedModel(
     const rimLipMode = clamshell ? params.boxRimLip ?? 'snap_light' : 'none';
     const lipOn = rimLipMode !== 'none';
     const lipC = 0.2; // sliding clearance between lip and lid wall
-    const lipT = Math.min(1.2, Math.max(0.8, measuredWallForLip() * 0.45)); // lip thickness (inner part of the wall)
+    // Lip: stands just INSIDE the box wall on a 45-degree ledge, so the lid wall that drops over it only
+    // loses the sliding clearance (a lip cut from the wall left the lid wall ~0.7 mm thin at the groove).
+    const lipT = 1.2;
+    void measuredWallForLip;
     const lipH = Math.min(3.2, Math.max(2.0, clamshellHalfMm - floorThicknessMm - 6)); // lip height above the rim
-    const snapMm = rimLipMode === 'snap_firm' ? 0.3 : rimLipMode === 'snap_light' ? 0.15 : 0;
+    // interference the bead has to push past (Light was too stiff at 0.15 in testing; that is now Firm)
+    const snapMm = rimLipMode === 'snap_firm' ? 0.15 : rimLipMode === 'snap_light' ? 0.08 : 0;
     // bead: 45-degree flanks up to (clearance + snap) proud of the lip face, with a short flat top
     const beadDepth = snapMm > 0 ? lipC + snapMm : 0;
     const beadH = 2 * beadDepth + 0.3;
@@ -719,7 +723,7 @@ export function buildExtrudedModel(
         lidThickness: clamshell ? clamshellHalfMm : lidTotalThicknessMm,
         clamshell,
         // with a rim lip the lid wall is thinner at the bottom, so brackets must root in the outer part
-        wall: lipOn ? Math.max(0.6, measuredWall - lipT - lipC - 0.2) : measuredWall,
+        wall: lipOn ? Math.max(0.6, measuredWall - lipC - 0.2) : measuredWall,
         clearance: params.boxHingeClearanceMm ?? 0.4,
         rimGap: hingeRimGapMm,
         pin: pinHinge,
@@ -861,10 +865,48 @@ export function buildExtrudedModel(
           extrudePolygonsToManifold(upperWalls, transformBoxPt, floorThicknessMm, plainWallTop, 0, 0, 0)
         );
         if (lipOn) {
-          // ring built from the wall's inner face: outer edge pushed out by lipT (into the wall), inner edge = cavity face
-          const lipRing = (outerOff: number, z0: number, z1: number) =>
-            extrudePolygonsToManifold(innerFaceRings(), transformBoxPt, z0, z1, 0, 0, outerOff);
-          appendBoxMesh(lipRing(lipT, clamshellHalfMm - 0.05, clamshellHalfMm + lipH));
+          // ring along the wall's inner face reaching lipT into the cavity (outer edge = wall face, or pushed
+          // into the wall for overlap below the rim)
+          // Built by stitching the two offset rings directly (same vertex count) rather than earcut, which can
+          // mis-bridge a hole that sits this close to its outer ring and fill the box opening with a triangle.
+          const lipRing = (outerOff: number, inward: number, z0: number, z1: number) => {
+            const vertices: Vec3[] = [];
+            const triangles: [number, number, number][] = [];
+            for (const poly of innerFaceRings()) {
+              const face = cleanRing2D(poly.outer.map(transformBoxPt));
+              if (face.length < 3) continue;
+              if (signedAreaVec2(face) < 0) face.reverse();
+              const o = offsetRingVec2(face, outerOff);
+              const n = offsetRingVec2(face, -inward);
+              const m = face.length;
+              const b = vertices.length;
+              // indices: outer bottom b+i, outer top b+m+i, inner bottom b+2m+i, inner top b+3m+i
+              for (const [ring, z] of [[o, z0], [o, z1], [n, z0], [n, z1]] as const) {
+                for (const v of ring) vertices.push({ x: v.x, y: v.y, z });
+              }
+              for (let i = 0; i < m; i++) {
+                const j = (i + 1) % m;
+                const ob = b + i, obj = b + j, ot = b + m + i, otj = b + m + j;
+                const ib = b + 2 * m + i, ibj = b + 2 * m + j, it = b + 3 * m + i, itj = b + 3 * m + j;
+                triangles.push([ob, obj, otj], [ob, otj, ot]); // outer side (faces outward)
+                triangles.push([ibj, ib, it], [ibj, it, itj]); // inner side (faces the cavity)
+                triangles.push([ot, otj, itj], [ot, itj, it]); // top
+                triangles.push([ob, ibj, obj], [ob, ib, ibj]); // bottom
+              }
+            }
+            return { vertices, triangles };
+          };
+          appendBoxMesh(lipRing(0, lipT, clamshellHalfMm - 0.05, clamshellHalfMm + lipH));
+          // 45-degree ledge under the lip so it prints without support (grows out of the wall face)
+          {
+            const ledgeSteps = 6;
+            const z0 = clamshellHalfMm - lipT - 0.05;
+            for (let k = 0; k < ledgeSteps; k++) {
+              const za = z0 + (lipT * k) / ledgeSteps;
+              const zb = z0 + (lipT * (k + 1)) / ledgeSteps;
+              appendBoxMesh(lipRing(0.4, (lipT * (k + 1)) / ledgeSteps, za, zb + 0.01));
+            }
+          }
           if (beadDepth > 0 && hinge) {
             // Bead only on the front and sides: near the hinge the lid wall swings in on an arc rather than
             // dropping straight down, so a bead there would drag instead of clicking (the hinge holds that side).
@@ -889,8 +931,8 @@ export function buildExtrudedModel(
                 const z1 = beadZ0 + (beadH * (k + 1)) / steps;
                 const p = beadAt((z0 + z1) / 2);
                 if (p <= 0.01) continue;
-                const out = offsetRingVec2(face, lipT + p).map((v) => ({ x: v.x, y: v.y }));
-                const hole = face.map((v) => ({ x: v.x, y: v.y }));
+                const out = offsetRingVec2(face, p).map((v) => ({ x: v.x, y: v.y }));
+                const hole = offsetRingVec2(face, -0.3).map((v) => ({ x: v.x, y: v.y })); // overlaps the lip
                 appendBoxMesh(extrudeClippedToHalfPlane(out, [hole], z0, z1, nx, ny, keepFrom));
               }
             }
@@ -1218,18 +1260,18 @@ export function buildExtrudedModel(
                 );
               const bandTop = rimZ + lipH + lipC;
               if (beadDepth > 0) {
-                band(lipT + lipC, rimZ, beadZ0);
+                band(lipC, rimZ, beadZ0);
                 const steps = Math.max(4, Math.round(beadH / 0.1));
                 for (let k = 0; k < steps; k++) {
                   const z0 = beadZ0 + (beadH * k) / steps;
                   const z1 = beadZ0 + (beadH * (k + 1)) / steps;
                   // the groove follows the bead's 45-degree profile, widened by the clearance
                   const p = Math.max(beadAt(z0), beadAt(z1));
-                  band(lipT + lipC + p + (p > 0.01 ? lipC : 0), z0, z1);
+                  band(lipC + p + (p > 0.01 ? lipC : 0), z0, z1);
                 }
-                band(lipT + lipC, beadZ0 + beadH, bandTop);
+                band(lipC, beadZ0 + beadH, bandTop);
               } else {
-                band(lipT + lipC, rimZ, bandTop);
+                band(lipC, rimZ, bandTop);
               }
               appendInto(
                 lidExtras,

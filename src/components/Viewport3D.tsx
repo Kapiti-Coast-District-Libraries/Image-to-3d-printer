@@ -23,6 +23,9 @@ interface Viewport3DProps {
   onToggleFlipFaceDown: () => void;
   mergeItemMode?: boolean;
   onToggleMergeItemMode?: () => void;
+  /** Painting is driven by the Colours panel: hide this view's own Merge Item button */
+  hidePaintToolbar?: boolean;
+  paintBannerText?: string;
   onMergeItemAtPixel?: (pixelX: number, pixelY: number) => void;
   mergedRegionsCount?: number;
   onUndoLastMergedRegion?: () => void;
@@ -46,6 +49,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   onToggleFlipFaceDown,
   mergeItemMode = false,
   onToggleMergeItemMode,
+  hidePaintToolbar = false,
+  paintBannerText,
   onMergeItemAtPixel,
   mergedRegionsCount = 0,
   onUndoLastMergedRegion,
@@ -415,7 +420,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           <div className="flex items-center gap-2 min-w-0">
             <MousePointerClick className="w-4 h-4 text-cyan-300 shrink-0 animate-pulse" />
             <span className="font-medium leading-snug">
-              Click any unwanted detail or part on the 3D model to merge it into its surrounding colour
+              {paintBannerText ?? 'Click any unwanted detail or part on the 3D model to merge it into its surrounding colour'}
             </span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -599,7 +604,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
         {/* Merge Item Tool, Explode Z-Layers, Face-Down Flip, and Wireframe Toggle */}
         <div className="pointer-events-auto flex items-center gap-2.5 bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-lg px-3 py-1.5">
-          {onToggleMergeItemMode && (
+          {onToggleMergeItemMode && !hidePaintToolbar && (
             <>
               <button
                 type="button"

@@ -21,70 +21,6 @@ export const BAMBU_FILAMENT_SWATCHES = [
   { name: 'Cobalt Blue', hex: '#2563EB' },
 ];
 
-/**
- * Picks which artwork colour forms the background around the artwork (the lid surround in box mode,
- * the backing plate for frameless plaques). Choosing from the artwork's own colours keeps the print
- * within the 4 AMS slots; change that slot's filament colour to get any other shade.
- */
-const SurroundColorPicker: React.FC<{
-  params: TraceParameters;
-  setParams: React.Dispatch<React.SetStateAction<TraceParameters>>;
-  traceResult: MultiColorTraceResult | null;
-  label: string;
-  hint: string;
-}> = ({ params, setParams, traceResult, label, hint }) => {
-  if (!traceResult) return null;
-  const layers = traceResult.layers.filter(
-    (l) => !l.isStrokeAndBase && l.enabled && l.mergedIntoSlot == null && l.pixelCount > 0
-  );
-  if (layers.length === 0) return null;
-  const active = resolveArtworkBaseSlot(traceResult, params);
-  const auto = params.baseSlotAuto !== false;
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-700 font-semibold">{label}</span>
-        <button
-          type="button"
-          onClick={() => setParams((p) => ({ ...p, baseSlotAuto: p.baseSlotAuto === false }))}
-          title="Automatically use the artwork colour that matches the picture's own background"
-          className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border cursor-pointer transition-colors ${
-            auto
-              ? 'bg-teal-50 text-teal-800 border-teal-300'
-              : 'bg-white text-slate-500 border-slate-300 hover:text-slate-800'
-          }`}
-        >
-          {auto ? '✓ Auto (matches picture)' : 'Auto'}
-        </button>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {layers.map((l) => (
-          <button
-            key={l.slotIndex}
-            type="button"
-            onClick={() =>
-              setParams((p) => ({ ...p, baseSlotIndex: l.slotIndex, baseSlotAuto: false }))
-            }
-            title={`AMS Slot ${l.slotIndex + 1} (${l.printHex})`}
-            className={`flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-lg border text-[10px] font-mono cursor-pointer transition-all ${
-              active === l.slotIndex
-                ? 'border-teal-600 ring-2 ring-teal-500/30 bg-teal-50 text-teal-900 font-bold'
-                : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400'
-            }`}
-          >
-            <span
-              className="w-5 h-5 rounded border border-black/10"
-              style={{ backgroundColor: l.printHex }}
-            />
-            Slot {l.slotIndex + 1}
-          </button>
-        ))}
-      </div>
-      <p className="text-[10px] text-slate-500 leading-snug">{hint}</p>
-    </div>
-  );
-};
-
 interface ProjectModeSectionProps {
   params: TraceParameters;
   setParams: React.Dispatch<React.SetStateAction<TraceParameters>>;
@@ -450,77 +386,6 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
               </div>
             </div>
           )}
-
-          {/* Lid surround (background around the artwork) */}
-          <SurroundColorPicker
-            params={params}
-            setParams={setParams}
-            traceResult={traceResult}
-            label="Lid Background Colour"
-            hint="The colour around your artwork on the lid (and the lid's edge). Want a colour that isn't in your picture? Change that slot's filament in Filament Colours."
-          />
-
-          {/* Box & Rim Color Swatches */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-slate-700 font-semibold">
-                Box Body &amp; Lid Rim Colour
-              </span>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setParams((p) => ({ ...p, boxColorFollowsLid: p.boxColorFollowsLid === false }))
-                  }
-                  title="When on, the box body is printed in the same colour as the lid's outer edge"
-                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border cursor-pointer transition-colors ${
-                    params.boxColorFollowsLid !== false
-                      ? 'bg-teal-50 text-teal-800 border-teal-300'
-                      : 'bg-white text-slate-500 border-slate-300 hover:text-slate-800'
-                  }`}
-                >
-                  {params.boxColorFollowsLid !== false ? '✓ Matches lid edge' : 'Match lid edge'}
-                </button>
-                <span className="text-[11px] font-mono text-slate-600">
-                  {params.strokeColorHex}
-                </span>
-                <input
-                  type="color"
-                  value={params.strokeColorHex}
-                  onChange={(e) =>
-                    setParams((p) => ({
-                      ...p,
-                      strokeColorHex: e.target.value.toUpperCase(),
-                      boxColorFollowsLid: false,
-                    }))
-                  }
-                  className="w-6 h-6 rounded cursor-pointer bg-transparent border-0"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-8 gap-1.5">
-              {BAMBU_FILAMENT_SWATCHES.map((sw) => {
-                const active = params.strokeColorHex === sw.hex;
-                return (
-                  <button
-                    key={sw.hex}
-                    type="button"
-                    onClick={() =>
-                      setParams((p) => ({ ...p, strokeColorHex: sw.hex, boxColorFollowsLid: false }))
-                    }
-                    className={`w-6 h-6 rounded-md border transition-transform cursor-pointer ${
-                      active
-                        ? 'border-teal-600 ring-2 ring-teal-500/30 scale-105'
-                        : 'border-slate-300 hover:scale-110'
-                    }`}
-                    style={{ backgroundColor: sw.hex }}
-                    title={sw.name}
-                  />
-                );
-              })}
-            </div>
-          </div>
 
           {/* Box Dimensions: Height & Wall Thickness */}
           <div className="grid grid-cols-2 gap-2.5 bg-white border border-slate-200/90 rounded-xl p-2.5">
@@ -1213,16 +1078,6 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
             </button>
           </div>
 
-          {!params.strokeEnabled && (
-            <SurroundColorPicker
-              params={params}
-              setParams={setParams}
-              traceResult={traceResult}
-              label="Backing Colour"
-              hint="The solid plate behind your artwork (shows around its edges). With a frame on, the frame colour is used instead."
-            />
-          )}
-
           {params.strokeEnabled && (
             <div className="bg-white border border-slate-200/90 rounded-xl p-3 space-y-3">
               {/* Frame Shape */}
@@ -1260,54 +1115,6 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                       >
                         {label}
                       </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Frame Color */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-slate-600 font-medium">
-                    Frame &amp; Base Colour
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-mono text-slate-600">
-                      {params.strokeColorHex}
-                    </span>
-                    <input
-                      type="color"
-                      value={params.strokeColorHex}
-                      onChange={(e) =>
-                        setParams((p) => ({
-                          ...p,
-                          strokeColorHex: e.target.value.toUpperCase(),
-                      boxColorFollowsLid: false,
-                        }))
-                      }
-                      className="w-6 h-6 rounded cursor-pointer bg-transparent border-0"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-8 gap-1.5">
-                  {BAMBU_FILAMENT_SWATCHES.map((sw) => {
-                    const active = params.strokeColorHex === sw.hex;
-                    return (
-                      <button
-                        key={sw.hex}
-                        type="button"
-                        onClick={() =>
-                          setParams((p) => ({ ...p, strokeColorHex: sw.hex, boxColorFollowsLid: false }))
-                        }
-                        className={`w-6 h-6 rounded-md border transition-transform cursor-pointer ${
-                          active
-                            ? 'border-blue-600 ring-2 ring-blue-500/30 scale-105'
-                            : 'border-slate-300 hover:scale-110'
-                        }`}
-                        style={{ backgroundColor: sw.hex }}
-                        title={sw.name}
-                      />
                     );
                   })}
                 </div>

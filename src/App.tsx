@@ -25,7 +25,7 @@ import {
   ExtrudedModelResult,
   ManifoldMeshPart,
   resolveBoxLidStyle,
-  getLidEdgeColorHex,
+  resolveArtworkBaseSlot,
   pickAutoBaseSlot,
 } from './lib/meshExtruder';
 import {
@@ -55,8 +55,7 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { ProjectModeSection } from './components/ProjectModeSection';
 import { SourceArtworkSection } from './components/SourceArtworkSection';
 import { PrintSizeSection } from './components/PrintSizeSection';
-import { FilamentColorsSection } from './components/FilamentColorsSection';
-import { CleanupSection } from './components/CleanupSection';
+import { ColorPaintSection, PaintBrush } from './components/ColorPaintSection';
 import { VectorTraceSection } from './components/VectorTraceSection';
 import { CustomizerConfig } from './types';
 import { computePrintEstimate, loadConfigImageData } from './lib/printEstimator';
@@ -217,6 +216,9 @@ export default function App() {
   const [eyedropperTarget, setEyedropperTarget] = useState<EyedropperTarget>(null);
   const [mergeItemMode, setMergeItemMode] = useState<boolean>(false);
   const [keepAreaMode, setKeepAreaMode] = useState<boolean>(false);
+  // Colour painting: the selected brush, and the order of paint actions (for one shared Undo)
+  const [paintBrush, setPaintBrush] = useState<PaintBrush>(null);
+  const [paintHistory, setPaintHistory] = useState<('merge' | 'keep')[]>([]);
   const [mergeItemTargetMode, setMergeItemTargetMode] =
     useState<MergeItemTargetMode>('surrounding');
   const [flipFaceDown, setFlipFaceDown] = useState<boolean>(true);
@@ -263,6 +265,8 @@ export default function App() {
     setActiveSampleId(sample.id);
     setProjectName(sample.title.replace(/\s+/g, '_'));
     setMergeItemMode(false);
+    setPaintBrush(null);
+    setPaintHistory([]);
     setEyedropperTarget(null);
     setLoadedFromAdminRef(null);
     setParams((prev) => ({
@@ -325,6 +329,8 @@ export default function App() {
         setActiveSampleId('custom');
         setMergeItemMode(false);
         setKeepAreaMode(false);
+        setPaintBrush(null);
+        setPaintHistory([]);
         setEyedropperTarget(null);
         setLoadedFromAdminRef(null);
         setParams((prev) => ({
@@ -590,14 +596,28 @@ export default function App() {
     if (auto !== params.baseSlotIndex) setParams((p) => ({ ...p, baseSlotIndex: auto }));
   }, [traceResult, params.baseSlotAuto, params.baseSlotIndex]);
 
-  // Box body colour follows the lid's outer edge colour unless the user picked a box colour themselves
+  // Box body (or badge frame) colour is always one of the 4 colours: the chosen slot, or by default the
+  // lid edge / backing colour. Kept in sync so changing that slot's filament recolours the box too.
   useEffect(() => {
-    if (!params.boxMode || params.boxColorFollowsLid === false || !traceResult) return;
-    const lidEdgeHex = getLidEdgeColorHex(traceResult, params);
-    if (lidEdgeHex && lidEdgeHex !== (params.strokeColorHex || '').toUpperCase()) {
-      setParams((p) => ({ ...p, strokeColorHex: lidEdgeHex }));
+    if (!traceResult || !(params.boxMode || params.strokeEnabled)) return;
+    if (params.boxColorSlot == null && params.boxColorFollowsLid === false) return; // older saved custom colour
+    const slot = Math.min(params.numColors - 1, params.boxColorSlot ?? resolveArtworkBaseSlot(traceResult, params));
+    const hex = traceResult.layers
+      .find((l) => l.slotIndex === slot && !l.isStrokeAndBase)
+      ?.printHex?.toUpperCase();
+    if (hex && hex !== (params.strokeColorHex || '').toUpperCase()) {
+      setParams((p) => ({ ...p, strokeColorHex: hex }));
     }
-  }, [traceResult, params.boxMode, params.boxColorFollowsLid, params.baseSlotIndex, params.numColors, params.strokeColorHex]);
+  }, [
+    traceResult,
+    params.boxMode,
+    params.strokeEnabled,
+    params.boxColorSlot,
+    params.boxColorFollowsLid,
+    params.baseSlotIndex,
+    params.numColors,
+    params.strokeColorHex,
+  ]);
 
   const handleSnapAllToBambuFilaments = useCallback(() => {
     if (!traceResult) return;
@@ -875,6 +895,53 @@ export default function App() {
 
   const mergedRegionsCount = params.mergedRegions?.length || 0;
 
+  /** Pick a paint brush: a colour slot (paint shapes that colour), 'cutout' (remove) or 'keep' (fill gap). */
+  const handleSelectBrush = useCallback((b: PaintBrush) => {
+    setPaintBrush(b);
+    setEyedropperTarget(null);
+    if (b === 'keep') {
+      setMergeItemMode(false);
+      setKeepAreaMode(true);
+    } else if (b !== null) {
+      setMergeItemTargetMode(b);
+      setKeepAreaMode(false);
+      setMergeItemMode(true);
+    } else {
+      setMergeItemMode(false);
+      setKeepAreaMode(false);
+    }
+  }, []);
+
+  const handlePaintAtPixel = useCallback(
+    (x: number, y: number) => {
+      handleMergeItemAtPixel(x, y);
+      setPaintHistory((h) => [...h, 'merge']);
+    },
+    [handleMergeItemAtPixel]
+  );
+
+  const handleFillAtPixel = useCallback(
+    (x: number, y: number) => {
+      handleKeepAreaAtPixel(x, y);
+      setPaintHistory((h) => [...h, 'keep']);
+    },
+    [handleKeepAreaAtPixel]
+  );
+
+  const paintEditsCount = mergedRegionsCount + (params.keptRegions?.length || 0);
+
+  const handleUndoPaint = useCallback(() => {
+    const last = paintHistory[paintHistory.length - 1] ?? (mergedRegionsCount > 0 ? 'merge' : 'keep');
+    if (last === 'merge') handleUndoLastMergedRegion();
+    else handleUndoLastKeptRegion();
+    setPaintHistory((h) => h.slice(0, -1));
+  }, [paintHistory, mergedRegionsCount, handleUndoLastMergedRegion, handleUndoLastKeptRegion]);
+
+  const handleResetPaint = useCallback(() => {
+    setParams((p) => ({ ...p, mergedRegions: [], keptRegions: [] }));
+    setPaintHistory([]);
+  }, []);
+
   const activeSwatchesForModal = useMemo(() => {
     if (!traceResult) return [];
     return traceResult.layers
@@ -1079,53 +1146,25 @@ export default function App() {
               traceResult={traceResult}
             />
 
-            {/* 04. Bambu AMS Filament Colours (Collapsible) */}
-            <FilamentColorsSection
+            {/* 04. Colours: 4 filament colours as paint brushes */}
+            <ColorPaintSection
               params={params}
               setParams={setParams}
               slotConfigs={slotConfigs}
               setSlotConfigs={setSlotConfigs}
               traceResult={traceResult}
-              highlightedSlot={highlightedSlot}
-              setHighlightedSlot={setHighlightedSlot}
-              openColorPickerSlot={openColorPickerSlot}
-              setOpenColorPickerSlot={setOpenColorPickerSlot}
-              eyedropperTarget={eyedropperTarget}
-              activateEyedropper={activateEyedropper}
-              handleToggleSlotEnabled={handleToggleSlotEnabled}
-              handleMergeSlotInto={handleMergeSlotInto}
-              handleUnmergeAllSlots={handleUnmergeAllSlots}
-              handleSnapAllToBambuFilaments={handleSnapAllToBambuFilaments}
-              closestMergeablePair={closestMergeablePair}
-              isExpanded={isColorsExpanded}
-              onToggleExpand={() => setIsColorsExpanded((v) => !v)}
-            />
-
-            {/* 05. Background & Region Cleanup (Collapsible) */}
-            <CleanupSection
-              params={params}
-              setParams={setParams}
-              traceResult={traceResult}
-              slotConfigs={slotConfigs}
+              brush={paintBrush}
+              onSelectBrush={handleSelectBrush}
+              canUndo={paintEditsCount > 0}
+              onUndo={handleUndoPaint}
+              onReset={handleResetPaint}
               imageSwatches={imageSwatches}
               isSwatchRemoved={isSwatchRemoved}
-              addOrToggleRemovedColor={addOrToggleRemovedColor}
-              eyedropperTarget={eyedropperTarget}
-              activateEyedropper={activateEyedropper}
-              mergeItemMode={mergeItemMode}
-              handleToggleMergeItemMode={handleToggleMergeItemMode}
-              mergedRegionsCount={mergedRegionsCount}
-              handleUndoLastMergedRegion={handleUndoLastMergedRegion}
-              handleClearMergedRegions={handleClearMergedRegions}
-              mergeItemTargetMode={mergeItemTargetMode}
-              setMergeItemTargetMode={setMergeItemTargetMode}
-              handleUpdateMergedRegionTarget={handleUpdateMergedRegionTarget}
-              handleRemoveMergedRegionById={handleRemoveMergedRegionById}
-              isExpanded={isCleanupExpanded}
-              onToggleExpand={() => setIsCleanupExpanded((v) => !v)}
+              onToggleSwatch={(sw) => addOrToggleRemovedColor(sw.rgb, 'global')}
+              onRestoreAllSwatches={() => setParams((p) => ({ ...p, removedColors: [] }))}
             />
 
-            {/* 06. Vector Smoothing Engine (Collapsible) */}
+            {/* 05. Advanced (colour count, background sensitivity, smoothing) */}
             <VectorTraceSection
               params={params}
               setParams={setParams}
@@ -1154,13 +1193,11 @@ export default function App() {
               <div className="flex items-center gap-1.5 flex-wrap">
                 {(
                   [
-                    ['3d_plate', '3D Bambu Plate'],
-                    ['vector_paths', '2D Vector Contours'],
-                    ['quantized_flat', '4-Colour Flatten'],
-                    ['side_by_side', 'Original vs Trace'],
+                    ['3d_plate', '3D'],
+                    ['vector_paths', '2D'],
                   ] as [MainViewMode, string][]
                 ).map(([mode, label]) => {
-                  const active = activeView === mode;
+                  const active = mode === '3d_plate' ? activeView === '3d_plate' : activeView !== '3d_plate';
                   return (
                     <button
                       key={mode}
@@ -1179,6 +1216,20 @@ export default function App() {
                     </button>
                   );
                 })}
+                {activeView !== '3d_plate' && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveView((v) => (v === 'side_by_side' ? 'vector_paths' : 'side_by_side'))}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                      activeView === 'side_by_side'
+                        ? 'bg-slate-800 text-white border-slate-800'
+                        : 'bg-white border-slate-200 text-slate-600 hover:text-slate-900'
+                    }`}
+                    title="Show the original picture next to the traced colours"
+                  >
+                    Show original
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1197,10 +1248,11 @@ export default function App() {
                     });
                   }}
                   mergeItemMode={mergeItemMode}
-                  onToggleMergeItemMode={handleToggleMergeItemMode}
-                  onMergeItemAtPixel={handleMergeItemAtPixel}
+                  onToggleMergeItemMode={() => handleSelectBrush(null)}
+                  hidePaintToolbar
+                  onMergeItemAtPixel={handlePaintAtPixel}
                   mergedRegionsCount={mergedRegionsCount}
-                  onUndoLastMergedRegion={handleUndoLastMergedRegion}
+                  onUndoLastMergedRegion={handleUndoPaint}
                   onClearMergedRegions={handleClearMergedRegions}
                   boxMode={Boolean(params.boxMode)}
                   boxPlateLayout={params.boxPlateLayout || 'assembled'}
@@ -1233,16 +1285,26 @@ export default function App() {
                   onToggleSlotEnabled={handleToggleSlotEnabled}
                   onCancelEyedropper={() => setEyedropperTarget(null)}
                   mergeItemMode={mergeItemMode}
-                  onToggleMergeItemMode={handleToggleMergeItemMode}
-                  onMergeItemAtPixel={handleMergeItemAtPixel}
+                  onToggleMergeItemMode={() => handleSelectBrush(null)}
+                  hidePaintToolbar
+                  onMergeItemAtPixel={handlePaintAtPixel}
                   mergedRegionsCount={mergedRegionsCount}
-                  onUndoLastMergedRegion={handleUndoLastMergedRegion}
+                  onUndoLastMergedRegion={handleUndoPaint}
                   onClearMergedRegions={handleClearMergedRegions}
                   keepAreaMode={keepAreaMode}
-                  onToggleKeepAreaMode={handleToggleKeepAreaMode}
-                  onKeepAreaAtPixel={handleKeepAreaAtPixel}
+                  onToggleKeepAreaMode={() => handleSelectBrush(null)}
+                  onKeepAreaAtPixel={handleFillAtPixel}
                   keptRegionsCount={params.keptRegions?.length || 0}
-                  onUndoLastKeptRegion={handleUndoLastKeptRegion}
+                  onUndoLastKeptRegion={handleUndoPaint}
+                  paintBannerText={
+                    paintBrush === 'cutout'
+                      ? 'Remove: click a shape to cut it out'
+                      : paintBrush === 'keep'
+                      ? 'Fill gap: click an area that was wrongly removed as background'
+                      : typeof paintBrush === 'number'
+                      ? `Painting with colour ${paintBrush + 1}: click any shape to make it this colour`
+                      : undefined
+                  }
                 />
               )}
 

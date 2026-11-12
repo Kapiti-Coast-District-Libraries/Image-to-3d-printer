@@ -123,6 +123,7 @@ export interface TraceParameters {
   boxHeightMm?: number; // Total Z height of the hollow box in millimeters (e.g. 28mm)
   boxLidStyle?: BoxLidStyle; // How the traced image lid seats into or onto the hollow stroke box
   boxLidToleranceMm?: number; // XY fit clearance between lid and box wall in millimeters (e.g. 0.20mm)
+  boxColorSlot?: number | null; // Box body / frame colour = this colour slot (null = same as the lid edge / backing)
   boxColorFollowsLid?: boolean; // Box body colour automatically matches the lid's outer edge (default true; picking a colour turns it off)
   boxHingeClearanceMm?: number;
   boxRimLip?: 'none' | 'lip' | 'snap_light' | 'snap_firm'; // Clamshell rim lip & snap (default snap_light)
