@@ -139,6 +139,8 @@ export interface TraceParameters {
   boxDividerCols?: number; // Number of compartment columns (1..8, default 2)
   boxDividerRows?: number; // Number of compartment rows (1..8, default 2)
   boxDividerThicknessMm?: number; // Thickness of divider walls in millimeters (default: 1.0mm)
+  boxDividerXFracs?: number[]; // Dragged column divider positions, 0..1 across the cavity (length cols-1); else even
+  boxDividerYFracs?: number[]; // Dragged row divider positions, 0..1 from the front (min Y) (length rows-1); else even
   boxDividerHeightRatio?: number; // Height ratio of dividers (0.2..1.0, default: 1.0 = flush with lid support ledge)
   extrusionMode: ExtrusionMode;
   targetWidthMm: number; // e.g. 90mm

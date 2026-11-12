@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ColorSlotConfig, DetectedImageSwatch, MultiColorTraceResult, TraceParameters } from '../lib/colorQuantizer';
 import { OFFICIAL_BAMBU_FILAMENTS } from '../lib/bambuFilaments';
 import { resolveArtworkBaseSlot } from '../lib/meshExtruder';
-import { Eraser, PaintBucket, Palette, Pencil, RotateCcw, Undo2, X } from 'lucide-react';
+import { Combine, Eraser, PaintBucket, Palette, Pencil, RotateCcw, Undo2, X } from 'lucide-react';
 
 /** What a click on the preview does: paint a shape with a colour slot, cut it out, or fill a gap. */
 export type PaintBrush = number | 'cutout' | 'keep' | null;
@@ -23,6 +23,8 @@ interface ColorPaintSectionProps {
   isSwatchRemoved: (sw: DetectedImageSwatch) => boolean;
   onToggleSwatch: (sw: DetectedImageSwatch) => void;
   onRestoreAllSwatches: () => void;
+  /** Print every shape of one colour in another colour instead (null = undo the merge) */
+  onMergeSlotInto: (source: number, target: number | null) => void;
 }
 
 /**
@@ -45,6 +47,7 @@ export const ColorPaintSection: React.FC<ColorPaintSectionProps> = ({
   isSwatchRemoved,
   onToggleSwatch,
   onRestoreAllSwatches,
+  onMergeSlotInto,
 }) => {
   const [editingSlot, setEditingSlot] = useState<number | null>(null);
   const slots = Array.from({ length: params.numColors }, (_, i) => {
@@ -54,8 +57,10 @@ export const ColorPaintSection: React.FC<ColorPaintSectionProps> = ({
       hex: (layer?.printHex || slotConfigs[i]?.printHex || '#94A3B8').toUpperCase(),
       detectedHex: layer?.detectedHex || slotConfigs[i]?.detectedHex || '#94A3B8',
       used: (layer?.pixelCount ?? 0) > 0,
+      mergedInto: layer?.mergedIntoSlot ?? slotConfigs[i]?.mergedIntoSlot ?? null,
     };
   });
+  const slotHex = (i: number | null) => (i == null ? '#94A3B8' : slots[i]?.hex ?? '#94A3B8');
 
   const setSlotFilament = (slot: number, hex: string, detectedHex: string) => {
     setSlotConfigs((prev) =>
@@ -127,18 +132,31 @@ export const ColorPaintSection: React.FC<ColorPaintSectionProps> = ({
       <div className={`grid gap-2 ${params.numColors === 4 ? 'grid-cols-4' : params.numColors === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
         {slots.map((s) => {
           const active = brush === s.slot;
+          const merged = s.mergedInto != null;
           return (
             <div key={s.slot} className="flex flex-col items-center gap-1">
               <button
                 type="button"
-                onClick={() => onSelectBrush(active ? null : s.slot)}
-                title={`Paint with colour ${s.slot + 1} (${s.hex})`}
-                className={`w-full aspect-square max-h-16 rounded-xl border-2 transition-all cursor-pointer shadow-2xs flex items-end justify-start p-1 ${
-                  active ? 'border-teal-600 ring-4 ring-teal-500/25 scale-[1.03]' : 'border-slate-300 hover:border-slate-400'
+                onClick={() =>
+                  merged ? setEditingSlot(editingSlot === s.slot ? null : s.slot) : onSelectBrush(active ? null : s.slot)
+                }
+                title={
+                  merged
+                    ? `Colour ${s.slot + 1} is merged into colour ${(s.mergedInto ?? 0) + 1}. Tap to unmerge.`
+                    : `Paint with colour ${s.slot + 1} (${s.hex})`
+                }
+                className={`relative w-full aspect-square max-h-16 rounded-xl border-2 transition-all cursor-pointer shadow-2xs flex items-end justify-start p-1 ${
+                  merged
+                    ? 'border-dashed border-slate-400 opacity-60'
+                    : active
+                    ? 'border-teal-600 ring-4 ring-teal-500/25 scale-[1.03]'
+                    : 'border-slate-300 hover:border-slate-400'
                 }`}
-                style={{ backgroundColor: s.hex }}
+                style={{ backgroundColor: merged ? slotHex(s.mergedInto) : s.hex }}
               >
-                <span className="text-[10px] font-bold font-mono px-1 rounded bg-white/85 text-slate-800">{s.slot + 1}</span>
+                <span className="text-[10px] font-bold font-mono px-1 rounded bg-white/85 text-slate-800">
+                  {merged ? `${s.slot + 1}→${(s.mergedInto ?? 0) + 1}` : s.slot + 1}
+                </span>
               </button>
               <button
                 type="button"
@@ -146,10 +164,10 @@ export const ColorPaintSection: React.FC<ColorPaintSectionProps> = ({
                 className={`flex items-center gap-1 text-[10px] font-semibold cursor-pointer ${
                   editingSlot === s.slot ? 'text-teal-700' : 'text-slate-500 hover:text-slate-800'
                 }`}
-                title="Change the filament this colour prints with"
+                title="Change the filament this colour prints with, or merge it into another colour"
               >
-                <Pencil className="w-3 h-3" />
-                {s.used ? 'Filament' : 'Unused'}
+                {merged ? <Combine className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
+                {merged ? 'Merged' : s.used ? 'Filament' : 'Unused'}
               </button>
             </div>
           );
@@ -160,11 +178,53 @@ export const ColorPaintSection: React.FC<ColorPaintSectionProps> = ({
       {editingSlot !== null && (
         <div className="bg-white border border-slate-200 rounded-xl p-2 space-y-1.5">
           <div className="flex items-center justify-between text-[11px]">
-            <span className="font-semibold text-slate-700">Filament for colour {editingSlot + 1}</span>
+            <span className="font-semibold text-slate-700">Colour {editingSlot + 1}</span>
             <button type="button" onClick={() => setEditingSlot(null)} className="text-slate-500 hover:text-slate-800 cursor-pointer">
               Done
             </button>
           </div>
+          {/* Merge: print all of this colour's shapes in another colour (e.g. greys that should be black) */}
+          {slots[editingSlot]?.mergedInto != null ? (
+            <div className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-[11px]">
+              <span className="text-slate-700">
+                Merged into colour {(slots[editingSlot].mergedInto ?? 0) + 1}: its shapes print in that colour.
+              </span>
+              <button
+                type="button"
+                onClick={() => onMergeSlotInto(editingSlot, null)}
+                className="shrink-0 font-semibold text-teal-700 hover:underline cursor-pointer"
+              >
+                Unmerge
+              </button>
+            </div>
+          ) : (
+            slots.some((o) => o.slot !== editingSlot && o.mergedInto == null) && (
+              <div className="flex items-center gap-1.5 text-[11px]">
+                <span className="flex items-center gap-1 text-slate-600 shrink-0">
+                  <Combine className="w-3.5 h-3.5" /> Merge into
+                </span>
+                {slots
+                  .filter((o) => o.slot !== editingSlot && o.mergedInto == null)
+                  .map((o) => (
+                    <button
+                      key={o.slot}
+                      type="button"
+                      onClick={() => {
+                        onMergeSlotInto(editingSlot, o.slot);
+                        if (brush === editingSlot) onSelectBrush(null);
+                        setEditingSlot(null);
+                      }}
+                      title={`Print colour ${editingSlot + 1}'s shapes in colour ${o.slot + 1} instead`}
+                      className="w-7 h-7 rounded-md border border-slate-300 hover:border-slate-600 hover:scale-105 transition-transform cursor-pointer flex items-end justify-start p-0.5"
+                      style={{ backgroundColor: o.hex }}
+                    >
+                      <span className="text-[9px] font-bold font-mono px-0.5 rounded bg-white/85 text-slate-800 leading-tight">{o.slot + 1}</span>
+                    </button>
+                  ))}
+              </div>
+            )
+          )}
+          {slots[editingSlot]?.mergedInto == null && (
           <div className="grid grid-cols-10 gap-1 max-h-32 overflow-y-auto pr-1">
             {OFFICIAL_BAMBU_FILAMENTS.map((f) => (
               <button
@@ -182,6 +242,7 @@ export const ColorPaintSection: React.FC<ColorPaintSectionProps> = ({
               />
             ))}
           </div>
+          )}
         </div>
       )}
 

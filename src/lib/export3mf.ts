@@ -32,6 +32,9 @@ interface ExportFilamentSlot {
 }
 
 // Default fallback palette for Bambu AMS Slots 1..4
+/** Bambu Studio version the project files claim (see appMetaName in generateBambu3mfBlob) */
+const BAMBU_PROJECT_VERSION = '02.00.00.00';
+
 const DEFAULT_BAMBU_4_COLORS = [
   '#141821', // Slot 1: Charcoal Black
   '#E12D39', // Slot 2: Scarlet Red
@@ -294,12 +297,20 @@ ${mainComponentLines.join('\n')}
       ? '\n  <metadata name="BambuStudio:3mfVersion">1</metadata>'
       : '';
 
+  // Bambu Studio only reads Metadata/project_settings.config (our 4 filaments) and the per-part filament
+  // assignments when the Application names Bambu Studio. Otherwise it treats the file as from another
+  // program, discards both and runs its colour-import step, which re-clusters the colours and can create
+  // broken "mixed filaments". The version is deliberately older than current releases so no "newer file"
+  // warning appears.
+  const appMetaName =
+    colorFormat === 'bambu_project' ? `BambuStudio-${BAMBU_PROJECT_VERSION}` : 'PolyTrace 3MF Studio';
+
   const modelXml = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US"
   xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
   xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
   xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">
-  <metadata name="Application">PolyTrace 3MF Studio</metadata>
+  <metadata name="Application">${appMetaName}</metadata>
   <metadata name="Title">${projectName}</metadata>${versionMetaLine}
   <resources>
     <m:colorgroup id="1">
@@ -368,6 +379,13 @@ ${modelInstancesXml}
   const projectSettingsJson = {
     from: 'project',
     name: projectName,
+    version: BAMBU_PROJECT_VERSION,
+    printer_variant: '0.4',
+    printer_technology: 'FFF',
+    filament_map: filamentSlots.map(() => '1'),
+    filament_map_mode: 'Auto For Flush',
+    nozzle_volume_type: ['Standard'],
+    extruder_type: ['Direct Drive'],
     printer_model: 'Bambu Lab X1 Carbon',
     printer_settings_id: 'Bambu Lab X1 Carbon 0.4 nozzle',
     print_settings_id: '0.20mm Standard @BBL X1C',

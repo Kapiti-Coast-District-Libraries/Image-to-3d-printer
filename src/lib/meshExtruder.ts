@@ -337,6 +337,17 @@ function getHorizontalIntersections(ring: Point[], yCoord: number): number[] {
  * Extrudes a set of 2D TracedPolygons (with holes) into a watertight indexed 3D mesh
  * between zBottom and zTop.
  */
+/**
+ * Position (0..1 across the cavity) of divider i (1-based) of a grid with n compartments: the user's dragged
+ * position when one is stored for this count, otherwise even spacing.
+ */
+export function dividerFrac(fracs: number[] | undefined, n: number, i: number): number {
+  if (fracs && fracs.length === n - 1 && Number.isFinite(fracs[i - 1])) {
+    return Math.max(0.03, Math.min(0.97, fracs[i - 1]));
+  }
+  return i / n;
+}
+
 function extrudePolygonsToManifold(
   polygons: TracedPolygon[],
   transformPt: (p: Point) => Point,
@@ -605,20 +616,29 @@ export function buildExtrudedModel(
     // ---- Clamshell rim lip: the inner part of the box half's wall rises above the rim and the lid half's
     // wall (thinned at its bottom) drops over it. Optional snap: a 45-degree bead round the lip near its top
     // clicks into a matching groove inside the lid wall. The flex is tiny and shared round the whole rim.
-    const rimLipMode = clamshell ? params.boxRimLip ?? 'snap_light' : 'none';
+    // Flat + pin lid: same lip. The lid gets a short skirt (pinSkirtMm) that drops over the lip and the box
+    // rim is lowered by the same amount, so the closed box keeps its height.
+    const rimLipMode = clamshell || pinHinge ? params.boxRimLip ?? 'snap_light' : 'none';
     const lipOn = rimLipMode !== 'none';
     const lipC = 0.2; // sliding clearance between lip and lid wall
     // Lip: stands just INSIDE the box wall on a 45-degree ledge, so the lid wall that drops over it only
     // loses the sliding clearance (a lip cut from the wall left the lid wall ~0.7 mm thin at the groove).
     const lipT = 1.2;
     void measuredWallForLip;
-    const lipH = Math.min(3.2, Math.max(2.0, clamshellHalfMm - floorThicknessMm - 6)); // lip height above the rim
+    const lipH = clamshell
+      ? Math.min(3.2, Math.max(2.0, clamshellHalfMm - floorThicknessMm - 6)) // lip height above the rim
+      : Math.min(3.2, Math.max(2.0, boxHeightMm - floorThicknessMm - 9));
+    /** Flat + pin lid with a lip: depth of the lid's skirt (the box rim drops by this much) */
+    const pinSkirtMm = pinHinge && lipOn ? lipH + lipC + 0.4 : 0;
+    /** Height of the box rim where box and lid meet */
+    const splitRimZ = clamshell ? clamshellHalfMm : boxHeightMm - pinSkirtMm;
+    const lidHasSkirt = clamshell || pinSkirtMm > 0;
     // interference the bead has to push past (Light was too stiff at 0.15 in testing; that is now Firm)
     const snapMm = rimLipMode === 'snap_firm' ? 0.15 : rimLipMode === 'snap_light' ? 0.08 : 0;
     // bead: 45-degree flanks up to (clearance + snap) proud of the lip face, with a short flat top
     const beadDepth = snapMm > 0 ? lipC + snapMm : 0;
     const beadH = 2 * beadDepth + 0.3;
-    const beadZ0 = clamshellHalfMm + lipH - 0.5 - beadH;
+    const beadZ0 = splitRimZ + lipH - 0.5 - beadH;
     const beadAt = (z: number) =>
       beadDepth <= 0 ? 0 : Math.max(0, Math.min(beadDepth, z - beadZ0, beadZ0 + beadH - z));
     // Rim clearance for hinged lids: grows with the hinge gap (a looser pin lets the lid sag further)
@@ -719,8 +739,8 @@ export function buildExtrudedModel(
     if (lidStyle === 'hinged') {
       hinge = buildPrintInPlaceHinge({
         outerRing: outerRingMm,
-        boxHeight: clamshell ? clamshellHalfMm : boxHeightMm,
-        lidThickness: clamshell ? clamshellHalfMm : lidTotalThicknessMm,
+        boxHeight: splitRimZ,
+        lidThickness: clamshell ? clamshellHalfMm : lidTotalThicknessMm + pinSkirtMm,
         clamshell,
         // with a rim lip the lid wall is thinner at the bottom, so brackets must root in the outer part
         wall: lipOn ? Math.max(0.6, measuredWall - lipC - 0.2) : measuredWall,
@@ -776,7 +796,7 @@ export function buildExtrudedModel(
     const pinLidOnPlate =
       pinHinge && ((plateLayout === 'side_by_side' && exportParts === 'both') || exportParts === 'lid_only');
     if (pinLidOnPlate && hinge) {
-      lidZBase = hinge.lidHangBelowRim;
+      lidZBase = hinge.lidHangBelowRim + pinSkirtMm;
     } else if (lidStyle === 'hinged') {
       lidZBase = boxHeightMm + hingeRimGapMm; // closed lid sits on the rim
     } else if (
@@ -856,8 +876,8 @@ export function buildExtrudedModel(
       } else if (lidStyle === 'hinged') {
         // Plain walls; the lid sits on top of the rim. With gusseted lid knuckles the top band of the
         // wall comes from the hinge, with 45-degree slots the gussets nest into when the lid closes.
-        const plainWallTop = clamshell
-          ? clamshellHalfMm
+        const plainWallTop = lidHasSkirt
+          ? splitRimZ
           : hinge?.wallTopMesh
           ? hinge.wallSplitZ
           : boxHeightMm;
@@ -896,11 +916,11 @@ export function buildExtrudedModel(
             }
             return { vertices, triangles };
           };
-          appendBoxMesh(lipRing(0, lipT, clamshellHalfMm - 0.05, clamshellHalfMm + lipH));
+          appendBoxMesh(lipRing(0, lipT, splitRimZ - 0.05, splitRimZ + lipH));
           // 45-degree ledge under the lip so it prints without support (grows out of the wall face)
           {
             const ledgeSteps = 6;
-            const z0 = clamshellHalfMm - lipT - 0.05;
+            const z0 = splitRimZ - lipT - 0.05;
             for (let k = 0; k < ledgeSteps; k++) {
               const za = z0 + (lipT * k) / ledgeSteps;
               const zb = z0 + (lipT * (k + 1)) / ledgeSteps;
@@ -1004,8 +1024,8 @@ export function buildExtrudedModel(
             lidStyle === 'cap_with_plug'
               ? boxHeightMm - plugDepthMm - 0.2
               : lidStyle === 'hinged'
-              ? clamshell
-                ? clamshellHalfMm - 0.3
+              ? lidHasSkirt
+                ? splitRimZ - 0.3
                 : hinge?.wallTopMesh
                 ? hinge.wallSplitZ - 0.2
                 : boxHeightMm - 0.3
@@ -1133,7 +1153,7 @@ export function buildExtrudedModel(
 
             // Vertical Dividers (dividing into 'cols' columns)
             for (let c = 1; c < cols; c++) {
-              const xCoord = cavityMinX + (c / cols) * cavitySpanX;
+              const xCoord = cavityMinX + dividerFrac(params.boxDividerXFracs, cols, c) * cavitySpanX;
               for (const [y0, y1] of dividerPieces(xCoord, getVerticalIntersections)) {
                 appendBoxMesh(
                   createBoxPrismMesh(xCoord - half, xCoord + half, y0, y1, dividerBottomZ, dividerTopZ)
@@ -1143,7 +1163,7 @@ export function buildExtrudedModel(
 
             // Horizontal Dividers (dividing into 'rows' rows)
             for (let r = 1; r < rows; r++) {
-              const yCoord = cavityMinY + (r / rows) * cavitySpanY;
+              const yCoord = cavityMinY + dividerFrac(params.boxDividerYFracs, rows, r) * cavitySpanY;
               for (const [x0, x1] of dividerPieces(yCoord, getHorizontalIntersections)) {
                 appendBoxMesh(
                   createBoxPrismMesh(x0, x1, yCoord - half, yCoord + half, dividerBottomZ, dividerTopZ)
@@ -1244,38 +1264,44 @@ export function buildExtrudedModel(
               : hinge.lidMeshClosed
           );
           // Clamshell lid half: its own walls from the rim up to the underside of the art plate
-          if (clamshell) {
-            const rimZ = clamshellHalfMm + hingeRimGapMm;
+          if (lidHasSkirt) {
+            // the lid may be laid beside the box on the plate (two-piece lid): follow it sideways
+            const skirtPt = (p: Point): Point => {
+              const q = transformPt(p);
+              return { x: q.x + lidOffsetX, y: q.y };
+            };
+            const rimZ = splitRimZ + hingeRimGapMm + dzLid;
+            const bZ0 = beadZ0 + dzLid;
             if (!lipOn) {
               appendInto(
                 lidExtras,
-                extrudePolygonsToManifold(upperWallsForMeasure, transformPt, rimZ, lidZBase + 0.05, 0, 0, 0)
+                extrudePolygonsToManifold(upperWallsForMeasure, skirtPt, rimZ, lidZBase + 0.05, 0, 0, 0)
               );
             } else {
               // inner face pushed out by lipT + clearance over the lip; groove (bead + clearance) at the bead
               const band = (holeWiden: number, z0: number, z1: number) =>
                 appendInto(
                   lidExtras,
-                  extrudePolygonsToManifold(upperWallsForMeasure, transformPt, z0, z1, 0, -holeWiden, 0)
+                  extrudePolygonsToManifold(upperWallsForMeasure, skirtPt, z0, z1, 0, -holeWiden, 0)
                 );
               const bandTop = rimZ + lipH + lipC;
               if (beadDepth > 0) {
-                band(lipC, rimZ, beadZ0);
+                band(lipC, rimZ, bZ0);
                 const steps = Math.max(4, Math.round(beadH / 0.1));
                 for (let k = 0; k < steps; k++) {
-                  const z0 = beadZ0 + (beadH * k) / steps;
-                  const z1 = beadZ0 + (beadH * (k + 1)) / steps;
+                  const z0 = bZ0 + (beadH * k) / steps;
+                  const z1 = bZ0 + (beadH * (k + 1)) / steps;
                   // the groove follows the bead's 45-degree profile, widened by the clearance
-                  const p = Math.max(beadAt(z0), beadAt(z1));
+                  const p = Math.max(beadAt(z0 - dzLid), beadAt(z1 - dzLid));
                   band(lipC + p + (p > 0.01 ? lipC : 0), z0, z1);
                 }
-                band(lipC, beadZ0 + beadH, bandTop);
+                band(lipC, bZ0 + beadH, bandTop);
               } else {
                 band(lipC, rimZ, bandTop);
               }
               appendInto(
                 lidExtras,
-                extrudePolygonsToManifold(upperWallsForMeasure, transformPt, bandTop - 0.02, lidZBase + 0.05, 0, 0, 0)
+                extrudePolygonsToManifold(upperWallsForMeasure, skirtPt, bandTop - 0.02, lidZBase + 0.05, 0, 0, 0)
               );
             }
           }

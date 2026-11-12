@@ -1162,6 +1162,7 @@ export default function App() {
               isSwatchRemoved={isSwatchRemoved}
               onToggleSwatch={(sw) => addOrToggleRemovedColor(sw.rgb, 'global')}
               onRestoreAllSwatches={() => setParams((p) => ({ ...p, removedColors: [] }))}
+              onMergeSlotInto={handleMergeSlotInto}
             />
 
             {/* 05. Advanced (colour count, background sensitivity, smoothing) */}

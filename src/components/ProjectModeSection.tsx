@@ -21,6 +21,145 @@ export const BAMBU_FILAMENT_SWATCHES = [
   { name: 'Cobalt Blue', hex: '#2563EB' },
 ];
 
+/**
+ * Top-down plan of the box cavity with draggable divider lines. Positions are fractions across the cavity
+ * (columns: left to right, rows: from the front); the top of the plan is the back of the box.
+ * Dragging updates locally and commits on release so the 3D model is rebuilt once per drag.
+ */
+const DividerPlanEditor: React.FC<{
+  cols: number;
+  rows: number;
+  xFracs?: number[];
+  yFracs?: number[];
+  aspect: number; // cavity width / depth
+  innerWidthMm: number;
+  innerDepthMm: number;
+  onCommit: (xFracs: number[] | undefined, yFracs: number[] | undefined) => void;
+}> = ({ cols, rows, xFracs, yFracs, aspect, innerWidthMm, innerDepthMm, onCommit }) => {
+  const even = (n: number) => Array.from({ length: Math.max(0, n - 1) }, (_, i) => (i + 1) / n);
+  const norm = (f: number[] | undefined, n: number) => (f && f.length === n - 1 ? f : even(n));
+  const [xs, setXs] = React.useState<number[]>(norm(xFracs, cols));
+  const [ys, setYs] = React.useState<number[]>(norm(yFracs, rows));
+  const [drag, setDrag] = React.useState<{ axis: 'x' | 'y'; i: number } | null>(null);
+  const svgRef = React.useRef<SVGSVGElement>(null);
+  React.useEffect(() => setXs(norm(xFracs, cols)), [xFracs, cols]); // eslint-disable-line react-hooks/exhaustive-deps
+  React.useEffect(() => setYs(norm(yFracs, rows)), [yFracs, rows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const W = 260;
+  const a = Math.max(0.35, Math.min(3, aspect || 1));
+  const H = Math.round(Math.max(90, Math.min(220, W / a)));
+  const minGap = 0.06; // keeps every compartment at least ~6% of the cavity wide
+
+  const clampAt = (prev: number[], i: number, f: number) => {
+    const next = [...prev];
+    const lo = (i > 0 ? prev[i - 1] : 0) + minGap;
+    const hi = (i < prev.length - 1 ? prev[i + 1] : 1) - minGap;
+    next[i] = Math.max(lo, Math.min(hi, f));
+    return next;
+  };
+  const move = (e: React.PointerEvent) => {
+    if (!drag || !svgRef.current) return;
+    const r = svgRef.current.getBoundingClientRect();
+    if (drag.axis === 'x') {
+      const f = (e.clientX - r.left) / r.width;
+      setXs((prev) => clampAt(prev, drag.i, f));
+    } else {
+      const f = 1 - (e.clientY - r.top) / r.height; // plan top = back of the box = far Y
+      setYs((prev) => clampAt(prev, drag.i, f));
+    }
+  };
+  const end = () => {
+    if (!drag) return;
+    setDrag(null);
+    const round = (v: number[]) => v.map((f) => Math.round(f * 1000) / 1000);
+    onCommit(cols > 1 ? round(xs) : undefined, rows > 1 ? round(ys) : undefined);
+  };
+  const startDrag = (axis: 'x' | 'y', i: number) => (e: React.PointerEvent) => {
+    svgRef.current?.setPointerCapture?.(e.pointerId);
+    setDrag({ axis, i });
+  };
+
+  const edgesX = [0, ...xs, 1];
+  const edgesY = [0, ...ys, 1];
+  const isEven = (f: number[], n: number) => f.every((v, i) => Math.abs(v - (i + 1) / n) < 0.002);
+  const custom = !isEven(xs, cols) || !isEven(ys, rows);
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-slate-600 font-medium">Drag the dividers to resize compartments</span>
+        <button
+          type="button"
+          disabled={!custom}
+          onClick={() => onCommit(undefined, undefined)}
+          className="text-[11px] font-semibold text-slate-500 hover:text-blue-600 disabled:opacity-40 flex items-center gap-1 cursor-pointer"
+          title="Space the dividers evenly again"
+        >
+          <RotateCcw className="w-3 h-3" /> Even
+        </button>
+      </div>
+      <div className="flex justify-center">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${W} ${H}`}
+          width="100%"
+          style={{ maxWidth: W, touchAction: 'none' }}
+          className="select-none"
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+        >
+          <rect x={1} y={1} width={W - 2} height={H - 2} rx={6} fill="#F8FAFC" stroke="#94A3B8" strokeWidth={2} />
+          <text x={W / 2} y={11} textAnchor="middle" fontSize={8} fill="#94A3B8">
+            back
+          </text>
+          {/* compartment sizes (approx. inside mm) */}
+          {edgesX.slice(1).map((x1, ci) =>
+            edgesY.slice(1).map((y1, ri) => {
+              const x0 = edgesX[ci];
+              const y0 = edgesY[ri];
+              return (
+                <text
+                  key={`${ci}-${ri}`}
+                  x={((x0 + x1) / 2) * W}
+                  y={(1 - (y0 + y1) / 2) * H + 3}
+                  textAnchor="middle"
+                  fontSize={9}
+                  fill="#475569"
+                  fontFamily="monospace"
+                >
+                  {Math.round((x1 - x0) * innerWidthMm)}×{Math.round((y1 - y0) * innerDepthMm)}
+                </text>
+              );
+            })
+          )}
+          {xs.map((f, i) => {
+            const active = drag?.axis === 'x' && drag.i === i;
+            return (
+              <g key={`x${i}`} style={{ cursor: 'ew-resize' }} onPointerDown={startDrag('x', i)}>
+                <line x1={f * W} y1={2} x2={f * W} y2={H - 2} stroke="transparent" strokeWidth={16} />
+                <line x1={f * W} y1={2} x2={f * W} y2={H - 2} stroke={active ? '#2563EB' : '#0F766E'} strokeWidth={3} />
+                <circle cx={f * W} cy={H - 12} r={6} fill="#fff" stroke={active ? '#2563EB' : '#0F766E'} strokeWidth={2} />
+              </g>
+            );
+          })}
+          {ys.map((f, i) => {
+            const active = drag?.axis === 'y' && drag.i === i;
+            const y = (1 - f) * H;
+            return (
+              <g key={`y${i}`} style={{ cursor: 'ns-resize' }} onPointerDown={startDrag('y', i)}>
+                <line x1={2} y1={y} x2={W - 2} y2={y} stroke="transparent" strokeWidth={16} />
+                <line x1={2} y1={y} x2={W - 2} y2={y} stroke={active ? '#2563EB' : '#0F766E'} strokeWidth={3} />
+                <circle cx={W - 12} cy={y} r={6} fill="#fff" stroke={active ? '#2563EB' : '#0F766E'} strokeWidth={2} />
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+};
+
 interface ProjectModeSectionProps {
   params: TraceParameters;
   setParams: React.Dispatch<React.SetStateAction<TraceParameters>>;
@@ -592,6 +731,24 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                   </div>
                 </div>
 
+                {((params.boxDividerCols ?? 2) > 1 || (params.boxDividerRows ?? 2) > 1) && (() => {
+                  const outerW = params.targetWidthMm;
+                  const outerD = params.strokeShape === 'rectangle' ? params.rectDepthMm ?? 65 : params.targetWidthMm;
+                  const wall = params.strokeWidthMm || 2.5;
+                  return (
+                    <DividerPlanEditor
+                      cols={params.boxDividerCols ?? 2}
+                      rows={params.boxDividerRows ?? 2}
+                      xFracs={params.boxDividerXFracs}
+                      yFracs={params.boxDividerYFracs}
+                      aspect={outerW / Math.max(1, outerD)}
+                      innerWidthMm={Math.max(1, outerW - 2 * wall)}
+                      innerDepthMm={Math.max(1, outerD - 2 * wall)}
+                      onCommit={(x, y) => setParams((p) => ({ ...p, boxDividerXFracs: x, boxDividerYFracs: y }))}
+                    />
+                  );
+                })()}
+
                 {/* Divider Wall Thickness (Default 1.0mm) */}
                 <div>
                   <div className="flex items-center justify-between text-[11px] mb-1">
@@ -818,8 +975,9 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                   </div>
                 )}
                 {resolved === 'hinged' &&
-                  (params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell')) ===
-                    'clamshell' && (
+                  ['clamshell', 'flat_pin'].includes(
+                    params.boxHingeLidMode ?? (params.boxHingeClamshell === false ? 'flat' : 'clamshell')
+                  ) && (
                   <div className="space-y-1 pt-1">
                     <span className="text-[11px] font-medium text-slate-600 block">Rim Lip</span>
                     <div className="grid grid-cols-4 gap-1 bg-slate-100 p-1 rounded-xl">
@@ -851,6 +1009,9 @@ export const ProjectModeSection: React.FC<ProjectModeSectionProps> = ({
                         : (params.boxRimLip ?? 'snap_light') === 'lip'
                         ? 'A lip round the inside of the rim lines the lid up and stops it sliding. No click.'
                         : 'A lip round the rim lines the lid up, and a small bead clicks into a groove inside the lid to hold it shut. The flex is tiny and shared round the whole rim. Try Light first; use Firm if it opens too easily.'}
+                      {(params.boxRimLip ?? 'snap_light') !== 'none' &&
+                        params.boxHingeLidMode === 'flat_pin' &&
+                        ' The flat lid gets a short skirt that drops over the lip, so the box itself is a little shorter.'}
                     </p>
                   </div>
                 )}
